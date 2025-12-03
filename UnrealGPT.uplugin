@@ -1,0 +1,32 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "UnrealGPT",
+	"Description": "AI-powered agent assistant for Unreal Engine 5.6 with code execution and computer use capabilities",
+	"Category": "Developer Tools",
+	"CreatedBy": "TREE Industries",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"EngineVersion": "5.6.0",
+	"EnabledByDefault": true,
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "UnrealGPT",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "UnrealGPTEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
+
