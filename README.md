@@ -1,9 +1,9 @@
-## UnrealGPT – UE5.6 Editor AI Agent Plugin
+## Unreal Agent – Unreal Engine Editor AI Agent Plugin
 
-UnrealGPT is an **AI-powered editor copilot** for Unreal Engine 5.6.  
+Unreal Agent is an **AI-powered editor copilot** for Unreal Engine.  
 It runs *inside* the editor as a dockable tab, talks to OpenAI’s GPT models, and can **inspect and modify your project** using Python, scene queries, screenshots, and external tools.
 
-- **Engine**: Unreal Engine 5.6  
+- **Engine**: Unreal Engine 5.6(current)  
 - **Type**: Editor + runtime plugin (`UnrealGPTEditor`, `UnrealGPT`)  
 - **Category**: Developer Tools
 
@@ -12,7 +12,6 @@ It runs *inside* the editor as a dockable tab, talks to OpenAI’s GPT models, a
 ### Key Features
 
 - **In‑editor chat assistant**
-  - Modern, high‑contrast chat UI with avatars, message bubbles, and markdown/code formatting.
   - Dockable `UnrealGPT` tab under `Window → UnrealGPT`.
   - `Ctrl+Enter` to send messages.
 
@@ -69,7 +68,7 @@ It runs *inside* the editor as a dockable tab, talks to OpenAI’s GPT models, a
   - Optional Replicate API endpoint (default: `https://api.replicate.com/v1/predictions`).
 - **OpenAI‑compatible API key** with access to:
   - Chosen GPT model (default `gpt-5.1`).
-  - `responses` or `chat.completions` endpoint.
+  - `responses` endpoint.
   - `audio/transcriptions` for Whisper.
   - `web_search` / `file_search` tools if you plan to use them.
 - **Python editor scripting**:
@@ -119,7 +118,6 @@ Key settings (`UUnrealGPTSettings`):
     - Optional; overrides only the base URL portion of the API endpoint (e.g. point at a proxy or self‑hosted gateway).
   - **API Endpoint**
     - Default: `https://api.openai.com/v1/responses`.
-    - You can switch to `/v1/chat/completions` if you prefer the legacy chat API.
   - **API Key**
     - Your OpenAI (or compatible) API key.
     - Used for both chat/responses and Whisper audio transcription.
@@ -337,12 +335,5 @@ Each helper:
 - **Author**: TREE Industries  
 - **Plugin Name**: `UnrealGPT`  
 - **Description**: “AI-powered agent assistant for Unreal Engine 5.6 with code execution and computer use capabilities”
-
-For deeper UI and implementation details, see:
-
-- `QUICK_REFERENCE.md`
-- `UI_DESIGN_SPECIFICATIONS.md`
-- `UI_IMPROVEMENTS_SUMMARY.md`
-- `IMPLEMENTATION_CHANGELOG.md`
 
 
