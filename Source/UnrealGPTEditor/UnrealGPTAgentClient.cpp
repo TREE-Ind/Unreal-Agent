@@ -2883,7 +2883,18 @@ void UUnrealGPTAgentClient::FocusViewportOnCreatedAsset(const FString& ResultJso
 
 TSharedRef<IHttpRequest> UUnrealGPTAgentClient::CreateHttpRequest()
 {
-	return FHttpModule::Get().CreateRequest();
+	TSharedRef<IHttpRequest> Request = FHttpModule::Get().CreateRequest();
+
+	// Apply per-request timeout from settings if configured
+	if (UUnrealGPTSettings* SafeSettings = GetMutableDefault<UUnrealGPTSettings>())
+	{
+		if (SafeSettings->ExecutionTimeoutSeconds > 0.0f)
+		{
+			Request->SetTimeout(SafeSettings->ExecutionTimeoutSeconds);
+		}
+	}
+
+	return Request;
 }
 
 FString UUnrealGPTAgentClient::GetEffectiveApiUrl() const

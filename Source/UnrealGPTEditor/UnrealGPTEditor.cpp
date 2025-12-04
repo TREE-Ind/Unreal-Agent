@@ -13,13 +13,11 @@ static const FName UnrealGPTTabName("UnrealGPT");
 
 void FUnrealGPTEditorModule::StartupModule()
 {
-	RegisterSettings();
 	RegisterMenus();
 }
 
 void FUnrealGPTEditorModule::ShutdownModule()
 {
-	UnregisterSettings();
 }
 
 void FUnrealGPTEditorModule::RegisterMenus()

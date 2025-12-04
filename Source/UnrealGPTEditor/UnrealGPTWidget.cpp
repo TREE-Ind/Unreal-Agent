@@ -35,6 +35,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Interfaces/IPluginManager.h"
+#include "Widgets/Layout/SWrapBox.h"
 
 namespace
 {
@@ -113,6 +114,75 @@ namespace
 	FSlateFontInfo GetUnrealGPTBodyItalicFont()
 	{
 		return MakeGeistFont(10, false, true);
+	}
+
+	// Render a single chat line with very lightweight inline markdown support.
+	// Currently supports only **bold** spans, mapped to the Geist bold font.
+	TSharedRef<SWidget> CreateInlineMarkdownTextWidget(const FString& Line)
+	{
+		const FLinearColor TextColor(0.95f, 0.95f, 0.95f, 1.0f);
+
+		TSharedRef<SWrapBox> WrapBox =
+			SNew(SWrapBox)
+			.UseAllottedSize(true)
+			.InnerSlotPadding(FVector2D::ZeroVector);
+
+		auto AddRun = [&WrapBox, &TextColor](const FString& Text, bool bBold)
+		{
+			if (Text.IsEmpty())
+			{
+				return;
+			}
+
+			WrapBox->AddSlot()
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(Text))
+				.AutoWrapText(true)
+				.Font(bBold ? GetUnrealGPTBodyBoldFont() : GetUnrealGPTBodyFont())
+				.ColorAndOpacity(TextColor)
+			];
+		};
+
+		int32 Pos = 0;
+		const int32 Length = Line.Len();
+
+		while (Pos < Length)
+		{
+			const int32 Open = Line.Find(TEXT("**"), ESearchCase::CaseSensitive, ESearchDir::FromStart, Pos);
+			if (Open == INDEX_NONE)
+			{
+				// No more bold markers; add the rest as normal text.
+				AddRun(Line.Mid(Pos), false);
+				break;
+			}
+
+			// Add any normal text before the bold span.
+			if (Open > Pos)
+			{
+				AddRun(Line.Mid(Pos, Open - Pos), false);
+			}
+
+			const int32 Close = Line.Find(TEXT("**"), ESearchCase::CaseSensitive, ESearchDir::FromStart, Open + 2);
+			if (Close == INDEX_NONE)
+			{
+				// Unmatched '**' – treat the remainder as normal text including the markers.
+				AddRun(Line.Mid(Open), false);
+				break;
+			}
+
+			// Extract the bold span between the markers.
+			const int32 BoldStart = Open + 2;
+			const int32 BoldLen = Close - BoldStart;
+			if (BoldLen > 0)
+			{
+				AddRun(Line.Mid(BoldStart, BoldLen), true);
+			}
+
+			Pos = Close + 2;
+		}
+
+		return WrapBox;
 	}
 }
 
@@ -646,26 +716,18 @@ TSharedRef<SWidget> SUnrealGPTWidget::CreateMarkdownWidget(const FString& Conten
 					.FillWidth(1.0f)
 					.VAlign(VAlign_Top)
 					[
-						SNew(STextBlock)
-						.Text(FText::FromString(ItemText))
-						.AutoWrapText(true)
-						.Font(GetUnrealGPTBodyFont())
-						.ColorAndOpacity(FLinearColor(0.95f, 0.95f, 0.95f, 1.0f))
+						CreateInlineMarkdownTextWidget(ItemText)
 					]
 				];
 
 			continue;
 		}
 
-		// Default paragraph line
+		// Default paragraph line (supports inline **bold** spans)
 		Container->AddSlot()
 			.AutoHeight()
 			[
-				SNew(STextBlock)
-				.Text(FText::FromString(Line))
-				.AutoWrapText(true)
-				.Font(GetUnrealGPTBodyFont())
-				.ColorAndOpacity(FLinearColor(0.95f, 0.95f, 0.95f, 1.0f))
+				CreateInlineMarkdownTextWidget(Line)
 			];
 	}
 
