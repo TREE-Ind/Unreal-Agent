@@ -1,0 +1,41 @@
+# Unreal Engine build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+Build/
+
+# Visual Studio / IDE
+.vs/
+*.sln
+*.suo
+*.user
+*.userosscache
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Archives and local bundles
+*.rar
+*.zip
+*.7z
+
+# UE Python API docs (local scraping/indexing — not part of plugin distribution)
+ue5_python_api_docs/
+ue5_python_api_docs_combined/
+ue5_python_api_docs_scraped/
+
+# Doc scraping tooling (development-only)
+UE5pythonscrape.py
+UE5pythonscrape_from_nav.py
+combine_scraped_docs.py
+
+# Root markdown docs (README.md is published)
+/*.md
+!/README.md
