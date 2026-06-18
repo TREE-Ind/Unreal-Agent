@@ -3,6 +3,7 @@
 #include "UnrealGPTAgentClient.h"
 #include "UnrealGPTSettings.h"
 #include "UnrealGPTAgentInstructions.h"
+#include "UnrealGPTClarifyTypes.h"
 #include "GenericPlatform/GenericPlatformHttp.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
@@ -14,12 +15,15 @@
 #include "Engine/World.h"
 #include "Editor/EditorEngine.h"
 #include "UnrealGPTSceneContext.h"
+#include "UnrealGPTBlueprintContext.h"
+#include "UnrealGPTReflectionQuery.h"
+#include "UnrealGPTAssetContext.h"
+#include "UnrealGPTLogReader.h"
+#include "UnrealGPTLogCapture.h"
 // #include "UnrealGPTComputerUse.h" // Computer Use tool disabled
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
 #include "HAL/FileManager.h"
-#include "UObject/Class.h"
-#include "UObject/UnrealType.h"
 #include "GameFramework/Actor.h"
 #include "EngineUtils.h"
 #include "Engine/Selection.h"
@@ -30,389 +34,9 @@
 #include "IImageWrapperModule.h"
 #include "Engine/Texture2D.h"
 #include "TextureResource.h"
-
-namespace
-{
-	/** Helper: convert an FProperty into a compact JSON description */
-	TSharedPtr<FJsonObject> BuildPropertyJson(FProperty* Property)
-	{
-		if (!Property)
-		{
-			return nullptr;
-		}
-
-		TSharedPtr<FJsonObject> PropJson = MakeShareable(new FJsonObject);
-		PropJson->SetStringField(TEXT("name"), Property->GetName());
-		PropJson->SetStringField(TEXT("cpp_type"), Property->GetCPPType(nullptr, 0));
-		PropJson->SetStringField(TEXT("ue_type"), Property->GetClass() ? Property->GetClass()->GetName() : TEXT("Unknown"));
-
-		// Basic, high-signal property flags that are relevant for Python/Blueprint use.
-		TArray<FString> Flags;
-		if (Property->HasAnyPropertyFlags(CPF_Edit))
-		{
-			Flags.Add(TEXT("Edit"));
-		}
-		if (Property->HasAnyPropertyFlags(CPF_BlueprintVisible))
-		{
-			Flags.Add(TEXT("BlueprintVisible"));
-		}
-		if (Property->HasAnyPropertyFlags(CPF_BlueprintReadOnly))
-		{
-			Flags.Add(TEXT("BlueprintReadOnly"));
-		}
-		if (Property->HasAnyPropertyFlags(CPF_Transient))
-		{
-			Flags.Add(TEXT("Transient"));
-		}
-		if (Property->HasAnyPropertyFlags(CPF_Config))
-		{
-			Flags.Add(TEXT("Config"));
-		}
-
-		if (Flags.Num() > 0)
-		{
-			TArray<TSharedPtr<FJsonValue>> FlagValues;
-			for (const FString& Flag : Flags)
-			{
-				FlagValues.Add(MakeShareable(new FJsonValueString(Flag)));
-			}
-			PropJson->SetArrayField(TEXT("flags"), FlagValues);
-		}
-
-		return PropJson;
-	}
-
-	/** Helper: convert a UFunction into a compact JSON description */
-	TSharedPtr<FJsonObject> BuildFunctionJson(UFunction* Function)
-	{
-		if (!Function)
-		{
-			return nullptr;
-		}
-
-		TSharedPtr<FJsonObject> FuncJson = MakeShareable(new FJsonObject);
-		FuncJson->SetStringField(TEXT("name"), Function->GetName());
-
-		// Function flags: only expose the ones that matter for scripting.
-		TArray<FString> Flags;
-		if (Function->HasAnyFunctionFlags(FUNC_BlueprintCallable))
-		{
-			Flags.Add(TEXT("BlueprintCallable"));
-		}
-		if (Function->HasAnyFunctionFlags(FUNC_BlueprintPure))
-		{
-			Flags.Add(TEXT("BlueprintPure"));
-		}
-		if (Function->HasAnyFunctionFlags(FUNC_BlueprintEvent))
-		{
-			Flags.Add(TEXT("BlueprintEvent"));
-		}
-		if (Function->HasAnyFunctionFlags(FUNC_Net))
-		{
-			Flags.Add(TEXT("Net"));
-		}
-		if (Function->HasAnyFunctionFlags(FUNC_Static))
-		{
-			Flags.Add(TEXT("Static"));
-		}
-
-		if (Flags.Num() > 0)
-		{
-			TArray<TSharedPtr<FJsonValue>> FlagValues;
-			for (const FString& Flag : Flags)
-			{
-				FlagValues.Add(MakeShareable(new FJsonValueString(Flag)));
-			}
-			FuncJson->SetArrayField(TEXT("flags"), FlagValues);
-		}
-
-		// Parameters and return type.
-		TArray<TSharedPtr<FJsonValue>> ParamsJson;
-		TSharedPtr<FJsonObject> ReturnJson;
-
-		for (TFieldIterator<FProperty> ParamIt(Function); ParamIt; ++ParamIt)
-		{
-			FProperty* ParamProp = *ParamIt;
-			if (!ParamProp)
-			{
-				continue;
-			}
-
-			const bool bIsReturn = ParamProp->HasAnyPropertyFlags(CPF_ReturnParm);
-			if (bIsReturn)
-			{
-				ReturnJson = MakeShareable(new FJsonObject);
-				ReturnJson->SetStringField(TEXT("name"), ParamProp->GetName());
-				ReturnJson->SetStringField(TEXT("cpp_type"), ParamProp->GetCPPType(nullptr, 0));
-				ReturnJson->SetStringField(TEXT("ue_type"), ParamProp->GetClass() ? ParamProp->GetClass()->GetName() : TEXT("Unknown"));
-				continue;
-			}
-
-			if (!ParamProp->HasAnyPropertyFlags(CPF_Parm))
-			{
-				continue;
-			}
-
-			TSharedPtr<FJsonObject> ParamJson = MakeShareable(new FJsonObject);
-			ParamJson->SetStringField(TEXT("name"), ParamProp->GetName());
-			ParamJson->SetStringField(TEXT("cpp_type"), ParamProp->GetCPPType(nullptr, 0));
-			ParamJson->SetStringField(TEXT("ue_type"), ParamProp->GetClass() ? ParamProp->GetClass()->GetName() : TEXT("Unknown"));
-			ParamJson->SetBoolField(TEXT("is_out"), ParamProp->HasAnyPropertyFlags(CPF_OutParm | CPF_ReferenceParm));
-
-			ParamsJson.Add(MakeShareable(new FJsonValueObject(ParamJson)));
-		}
-
-		if (ParamsJson.Num() > 0)
-		{
-			FuncJson->SetArrayField(TEXT("parameters"), ParamsJson);
-		}
-		if (ReturnJson.IsValid())
-		{
-			FuncJson->SetObjectField(TEXT("return"), ReturnJson);
-		}
-
-		return FuncJson;
-	}
-
-	/** Helper: build a reflection "schema" JSON object for a class */
-	FString BuildReflectionSchemaJson(UClass* Class)
-	{
-		if (!Class)
-		{
-			TSharedPtr<FJsonObject> ErrorObj = MakeShareable(new FJsonObject);
-			ErrorObj->SetStringField(TEXT("status"), TEXT("error"));
-			ErrorObj->SetStringField(TEXT("message"), TEXT("Class not found"));
-
-			FString ErrorJson;
-			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&ErrorJson);
-			FJsonSerializer::Serialize(ErrorObj.ToSharedRef(), Writer);
-			return ErrorJson;
-		}
-
-		TSharedPtr<FJsonObject> Root = MakeShareable(new FJsonObject);
-		Root->SetStringField(TEXT("status"), TEXT("ok"));
-		Root->SetStringField(TEXT("class_name"), Class->GetName());
-		Root->SetStringField(TEXT("path_name"), Class->GetPathName());
-		Root->SetStringField(TEXT("cpp_type"), FString::Printf(TEXT("%s*"), *Class->GetName()));
-
-		// Properties
-		TArray<TSharedPtr<FJsonValue>> PropertiesJson;
-		for (TFieldIterator<FProperty> PropIt(Class, EFieldIteratorFlags::IncludeSuper); PropIt; ++PropIt)
-		{
-			FProperty* Property = *PropIt;
-			TSharedPtr<FJsonObject> PropJson = BuildPropertyJson(Property);
-			if (PropJson.IsValid())
-			{
-				PropertiesJson.Add(MakeShareable(new FJsonValueObject(PropJson)));
-			}
-		}
-		Root->SetArrayField(TEXT("properties"), PropertiesJson);
-
-		// Functions
-		TArray<TSharedPtr<FJsonValue>> FunctionsJson;
-		for (TFieldIterator<UFunction> FuncIt(Class, EFieldIteratorFlags::IncludeSuper); FuncIt; ++FuncIt)
-		{
-			UFunction* Function = *FuncIt;
-			TSharedPtr<FJsonObject> FuncJson = BuildFunctionJson(Function);
-			if (FuncJson.IsValid())
-			{
-				FunctionsJson.Add(MakeShareable(new FJsonValueObject(FuncJson)));
-			}
-		}
-		Root->SetArrayField(TEXT("functions"), FunctionsJson);
-
-		FString OutJson;
-		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutJson);
-		FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
-		return OutJson;
-	}
-
-	/**
-	 * Helper: Convert an image from a texture asset path or file path to base64 PNG data URI.
-	 * Returns an empty string on failure.
-	 * @param ImagePath Asset path (e.g. "/Game/Textures/MyTex") or file path on disk.
-	 * @param OutError Receives an error message on failure.
-	 */
-	FString ConvertImageToBase64DataUri(const FString& ImagePath, FString& OutError)
-	{
-		TArray<uint8> PngData;
-
-		// First try to load as an Unreal asset (UTexture2D)
-		FString AssetPath = ImagePath;
-		// Normalize asset path - ensure it has the object name for LoadObject
-		if (AssetPath.StartsWith(TEXT("/Game/")) || AssetPath.StartsWith(TEXT("/Engine/")))
-		{
-			// If path doesn't have an object name (e.g. "/Game/Textures/MyTex" vs "/Game/Textures/MyTex.MyTex")
-			if (!AssetPath.Contains(TEXT(".")))
-			{
-				// Extract the asset name and append it
-				FString AssetName = FPaths::GetBaseFilename(AssetPath);
-				AssetPath = FString::Printf(TEXT("%s.%s"), *AssetPath, *AssetName);
-			}
-
-			UTexture2D* Texture = LoadObject<UTexture2D>(nullptr, *AssetPath);
-			if (Texture)
-			{
-				// Get the platform data to read pixels
-				FTexturePlatformData* PlatformData = Texture->GetPlatformData();
-				if (!PlatformData || PlatformData->Mips.Num() == 0)
-				{
-					OutError = FString::Printf(TEXT("Texture '%s' has no platform data or mips"), *ImagePath);
-					return FString();
-				}
-
-				const FTexture2DMipMap& Mip = PlatformData->Mips[0];
-				const int32 Width = Mip.SizeX;
-				const int32 Height = Mip.SizeY;
-
-				// Lock the mip data for reading
-				const void* MipData = Mip.BulkData.LockReadOnly();
-				if (!MipData)
-				{
-					OutError = FString::Printf(TEXT("Failed to lock texture data for '%s'"), *ImagePath);
-					return FString();
-				}
-
-				// Copy the raw pixel data
-				const int64 DataSize = Mip.BulkData.GetBulkDataSize();
-				TArray<uint8> RawData;
-				RawData.SetNumUninitialized(DataSize);
-				FMemory::Memcpy(RawData.GetData(), MipData, DataSize);
-				Mip.BulkData.Unlock();
-
-				// Convert to PNG using ImageWrapper
-				IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
-				TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
-
-				if (!ImageWrapper.IsValid())
-				{
-					OutError = TEXT("Failed to create image wrapper");
-					return FString();
-				}
-
-				// Determine the pixel format - most imported textures use BGRA
-				ERGBFormat RGBFormat = ERGBFormat::BGRA;
-				if (PlatformData->PixelFormat == PF_R8G8B8A8)
-				{
-					RGBFormat = ERGBFormat::RGBA;
-				}
-
-				if (!ImageWrapper->SetRaw(RawData.GetData(), RawData.Num(), Width, Height, RGBFormat, 8))
-				{
-					OutError = FString::Printf(TEXT("Failed to set raw image data for '%s'"), *ImagePath);
-					return FString();
-				}
-
-				PngData = ImageWrapper->GetCompressed();
-				if (PngData.Num() == 0)
-				{
-					OutError = FString::Printf(TEXT("Failed to compress texture '%s' to PNG"), *ImagePath);
-					return FString();
-				}
-
-				UE_LOG(LogTemp, Log, TEXT("UnrealGPT: Converted texture asset '%s' to PNG (%d bytes)"), *ImagePath, PngData.Num());
-			}
-		}
-
-		// If we didn't load as an asset, try loading as a file from disk
-		if (PngData.Num() == 0)
-		{
-			FString FilePath = ImagePath;
-			
-			// Make absolute if relative
-			if (FPaths::IsRelative(FilePath))
-			{
-				FilePath = FPaths::Combine(FPaths::ProjectDir(), FilePath);
-			}
-
-			if (!FPaths::FileExists(FilePath))
-			{
-				OutError = FString::Printf(TEXT("Image not found as asset or file: '%s'"), *ImagePath);
-				return FString();
-			}
-
-			TArray<uint8> FileData;
-			if (!FFileHelper::LoadFileToArray(FileData, *FilePath))
-			{
-				OutError = FString::Printf(TEXT("Failed to read file: '%s'"), *FilePath);
-				return FString();
-			}
-
-			// Detect image format and convert to PNG if needed
-			IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
-			
-			// Try to detect format from file extension first
-			EImageFormat ImageFormat = EImageFormat::Invalid;
-			FString Extension = FPaths::GetExtension(FilePath).ToLower();
-			if (Extension == TEXT("png"))
-			{
-				ImageFormat = EImageFormat::PNG;
-				// PNG can be used directly
-				PngData = MoveTemp(FileData);
-			}
-			else
-			{
-				// Detect format and convert to PNG
-				if (Extension == TEXT("jpg") || Extension == TEXT("jpeg"))
-				{
-					ImageFormat = EImageFormat::JPEG;
-				}
-				else if (Extension == TEXT("bmp"))
-				{
-					ImageFormat = EImageFormat::BMP;
-				}
-				else if (Extension == TEXT("tga"))
-				{
-					ImageFormat = EImageFormat::TGA;
-				}
-
-				if (ImageFormat == EImageFormat::Invalid)
-				{
-					OutError = FString::Printf(TEXT("Unsupported image format for file: '%s'"), *FilePath);
-					return FString();
-				}
-
-				// Decompress the source format
-				TSharedPtr<IImageWrapper> SourceWrapper = ImageWrapperModule.CreateImageWrapper(ImageFormat);
-				if (!SourceWrapper.IsValid() || !SourceWrapper->SetCompressed(FileData.GetData(), FileData.Num()))
-				{
-					OutError = FString::Printf(TEXT("Failed to decode image file: '%s'"), *FilePath);
-					return FString();
-				}
-
-				TArray<uint8> RawBGRA;
-				if (!SourceWrapper->GetRaw(ERGBFormat::BGRA, 8, RawBGRA))
-				{
-					OutError = FString::Printf(TEXT("Failed to get raw pixel data from: '%s'"), *FilePath);
-					return FString();
-				}
-
-				// Re-encode as PNG
-				TSharedPtr<IImageWrapper> PngWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
-				if (!PngWrapper.IsValid() || 
-					!PngWrapper->SetRaw(RawBGRA.GetData(), RawBGRA.Num(), SourceWrapper->GetWidth(), SourceWrapper->GetHeight(), ERGBFormat::BGRA, 8))
-				{
-					OutError = FString::Printf(TEXT("Failed to encode PNG from: '%s'"), *FilePath);
-					return FString();
-				}
-
-				PngData = PngWrapper->GetCompressed();
-			}
-
-			UE_LOG(LogTemp, Log, TEXT("UnrealGPT: Loaded image file '%s' as PNG (%d bytes)"), *FilePath, PngData.Num());
-		}
-
-		if (PngData.Num() == 0)
-		{
-			OutError = FString::Printf(TEXT("Failed to load image from: '%s'"), *ImagePath);
-			return FString();
-		}
-
-		// Convert to base64 data URI
-		FString Base64 = FBase64::Encode(PngData);
-		return FString::Printf(TEXT("data:image/png;base64,%s"), *Base64);
-	}
-}
+#include "UnrealGPTToolSchemas.h"
+#include "Mcp/UnrealGPTMcpSubsystem.h"
+#include "EditorSubsystem.h"
 
 UUnrealGPTAgentClient::UUnrealGPTAgentClient()
 	: ToolCallIterationCount(0)
@@ -439,6 +63,14 @@ void UUnrealGPTAgentClient::Initialize()
 	if (!Settings)
 	{
 		Settings = GetMutableDefault<UUnrealGPTSettings>();
+	}
+
+	if (GEditor)
+	{
+		if (UUnrealGPTMcpSubsystem* McpSubsystem = GEditor->GetEditorSubsystem<UUnrealGPTMcpSubsystem>())
+		{
+			McpSubsystem->ReloadServers();
+		}
 	}
 }
 
@@ -476,6 +108,11 @@ void UUnrealGPTAgentClient::SendMessage(const FString& UserMessage, const TArray
 	const bool bIsNewUserMessage = !UserMessage.IsEmpty();
 	if (bIsNewUserMessage)
 	{
+		if (bAwaitingClarifyResponse)
+		{
+			FinalizeClarifyResponse(PendingClarifyCallId, FUnrealGPTClarifyTypes::BuildCancelledResult(), false);
+		}
+
 		ToolCallIterationCount = 0;
 		bHasRetriedAfterCodexRefresh = false;
 		// If history is empty, clear PreviousResponseId as it's a fresh conversation
@@ -1244,16 +881,61 @@ void UUnrealGPTAgentClient::CancelRequest()
 		CurrentRequest->CancelRequest();
 		bRequestInProgress = false;
 	}
+
+	if (bAwaitingClarifyResponse)
+	{
+		FinalizeClarifyResponse(PendingClarifyCallId, FUnrealGPTClarifyTypes::BuildCancelledResult(), false);
+	}
+}
+
+void UUnrealGPTAgentClient::ClearPendingClarify()
+{
+	PendingClarifyCallId.Empty();
+	bAwaitingClarifyResponse = false;
+}
+
+void UUnrealGPTAgentClient::FinalizeClarifyResponse(const FString& ToolCallId, const FString& ResultJson, bool bContinueConversation)
+{
+	if (!bAwaitingClarifyResponse || PendingClarifyCallId != ToolCallId)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UnrealGPT: Ignoring clarify response for stale or missing call id %s"), *ToolCallId);
+		return;
+	}
+
+	FAgentMessage ToolMsg;
+	ToolMsg.Role = TEXT("tool");
+	ToolMsg.ToolCallId = ToolCallId;
+	ToolMsg.Content = ResultJson;
+	ConversationHistory.Add(ToolMsg);
+
+	OnToolResult.Broadcast(ToolCallId, ResultJson);
+	ClearPendingClarify();
+
+	if (bContinueConversation)
+	{
+		SendMessage(TEXT(""), TArray<FString>());
+	}
+}
+
+void UUnrealGPTAgentClient::SubmitClarifyResponse(const FString& ToolCallId, const FString& AnswersJson)
+{
+	FinalizeClarifyResponse(ToolCallId, AnswersJson, true);
 }
 
 void UUnrealGPTAgentClient::ClearHistory()
 {
+	if (bAwaitingClarifyResponse)
+	{
+		ClearPendingClarify();
+	}
+
 	ConversationHistory.Empty();
 	PreviousResponseId.Empty();
 	ToolCallIterationCount = 0;
 	ExecutedToolCallSignatures.Reset();
 	bLastToolWasPythonExecute = false;
 	bLastSceneQueryFoundResults = false;
+	FUnrealGPTLogCapture::Get().ResetReadCursor();
 }
 
 TArray<TSharedPtr<FJsonObject>> UUnrealGPTAgentClient::BuildToolDefinitions()
@@ -1404,8 +1086,49 @@ TArray<TSharedPtr<FJsonObject>> UUnrealGPTAgentClient::BuildToolDefinitions()
 		ClassNameProp->SetStringField(TEXT("type"), TEXT("string"));
 		ClassNameProp->SetStringField(
 			TEXT("description"),
-			TEXT("Name or path of the UClass to inspect. You can pass a short name like 'StaticMeshActor' or a fully qualified path like '/Script/Engine.StaticMeshActor'."));
+			TEXT("Name or path of the UClass to inspect. Short name (e.g. 'StaticMeshActor'), fully qualified path (e.g. '/Script/Engine.StaticMeshActor'), or Blueprint generated class path (e.g. '/Game/BP_MyActor.BP_MyActor_C')."));
 		Properties->SetObjectField(TEXT("class_name"), ClassNameProp);
+
+		TSharedPtr<FJsonObject> MemberContainsProp = MakeShareable(new FJsonObject);
+		MemberContainsProp->SetStringField(TEXT("type"), TEXT("string"));
+		MemberContainsProp->SetStringField(
+			TEXT("description"),
+			TEXT("Optional substring filter on property/function names (case-insensitive). Use this to target a specific member instead of dumping the whole class."));
+		Properties->SetObjectField(TEXT("member_contains"), MemberContainsProp);
+
+		TSharedPtr<FJsonObject> IncludeSuperProp = MakeShareable(new FJsonObject);
+		IncludeSuperProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		IncludeSuperProp->SetStringField(
+			TEXT("description"),
+			TEXT("Include inherited members from parent classes (default false). Set true only when you need base-class members."));
+		IncludeSuperProp->SetBoolField(TEXT("default"), false);
+		Properties->SetObjectField(TEXT("include_super"), IncludeSuperProp);
+
+		TSharedPtr<FJsonObject> ScriptableOnlyProp = MakeShareable(new FJsonObject);
+		ScriptableOnlyProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		ScriptableOnlyProp->SetStringField(
+			TEXT("description"),
+			TEXT("Return only Edit/Blueprint-visible properties and Blueprint-callable functions (default true). Set false to include internal/native members."));
+		ScriptableOnlyProp->SetBoolField(TEXT("default"), true);
+		Properties->SetObjectField(TEXT("scriptable_only"), ScriptableOnlyProp);
+
+		TSharedPtr<FJsonObject> IncludePropertiesProp = MakeShareable(new FJsonObject);
+		IncludePropertiesProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		IncludePropertiesProp->SetStringField(TEXT("description"), TEXT("Include reflected properties (default true)."));
+		IncludePropertiesProp->SetBoolField(TEXT("default"), true);
+		Properties->SetObjectField(TEXT("include_properties"), IncludePropertiesProp);
+
+		TSharedPtr<FJsonObject> IncludeFunctionsProp = MakeShareable(new FJsonObject);
+		IncludeFunctionsProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		IncludeFunctionsProp->SetStringField(TEXT("description"), TEXT("Include reflected functions (default true)."));
+		IncludeFunctionsProp->SetBoolField(TEXT("default"), true);
+		Properties->SetObjectField(TEXT("include_functions"), IncludeFunctionsProp);
+
+		TSharedPtr<FJsonObject> MaxResultsProp = MakeShareable(new FJsonObject);
+		MaxResultsProp->SetStringField(TEXT("type"), TEXT("integer"));
+		MaxResultsProp->SetStringField(TEXT("description"), TEXT("Maximum members returned per category (properties/functions), default 40."));
+		MaxResultsProp->SetNumberField(TEXT("default"), 40);
+		Properties->SetObjectField(TEXT("max_results"), MaxResultsProp);
 
 		ReflectionParams->SetObjectField(TEXT("properties"), Properties);
 
@@ -1415,10 +1138,77 @@ TArray<TSharedPtr<FJsonObject>> UUnrealGPTAgentClient::BuildToolDefinitions()
 
 		Tools.Add(BuildToolObject(
 			TEXT("reflection_query"),
-			TEXT("Inspect an Unreal UClass via the reflection system at runtime. ")
-			TEXT("Given a class_name (C++ or Blueprint), this returns a JSON schema describing its reflected properties and functions, ")
-			TEXT("including names, C++ types, and high-signal flags that matter for Python/Blueprint access."),
+			TEXT("Inspect an Unreal UClass via the reflection system. Returns a compact JSON schema of reflected properties and functions relevant to Python/Blueprint scripting. ")
+			TEXT("By default only scriptable members declared on the class are returned. Use member_contains to search for a specific property/function, and include_super=true only when inherited members are needed."),
 			ReflectionParams));
+	}
+
+	// Editor log reader: token-efficient tail of UE Output Log / Saved/Logs.
+	{
+		TSharedPtr<FJsonObject> ReadLogParams = MakeShareable(new FJsonObject);
+		ReadLogParams->SetStringField(TEXT("type"), TEXT("object"));
+
+		TSharedPtr<FJsonObject> Properties = MakeShareable(new FJsonObject);
+
+		TSharedPtr<FJsonObject> MaxLinesProp = MakeShareable(new FJsonObject);
+		MaxLinesProp->SetStringField(TEXT("type"), TEXT("integer"));
+		MaxLinesProp->SetStringField(TEXT("description"), TEXT("Maximum log lines to return (default 40, max 150)."));
+		MaxLinesProp->SetNumberField(TEXT("default"), 40);
+		Properties->SetObjectField(TEXT("max_lines"), MaxLinesProp);
+
+		TSharedPtr<FJsonObject> MaxCharsProp = MakeShareable(new FJsonObject);
+		MaxCharsProp->SetStringField(TEXT("type"), TEXT("integer"));
+		MaxCharsProp->SetStringField(TEXT("description"), TEXT("Character budget for the response (default 8000). Older lines are dropped first when exceeded."));
+		MaxCharsProp->SetNumberField(TEXT("default"), 8000);
+		Properties->SetObjectField(TEXT("max_chars"), MaxCharsProp);
+
+		TSharedPtr<FJsonObject> MinVerbosityProp = MakeShareable(new FJsonObject);
+		MinVerbosityProp->SetStringField(TEXT("type"), TEXT("string"));
+		MinVerbosityProp->SetStringField(
+			TEXT("description"),
+			TEXT("Minimum verbosity to include: error, warning, display, log, or all (default warning)."));
+		MinVerbosityProp->SetStringField(TEXT("default"), TEXT("warning"));
+		Properties->SetObjectField(TEXT("min_verbosity"), MinVerbosityProp);
+
+		TSharedPtr<FJsonObject> CategoryProp = MakeShareable(new FJsonObject);
+		CategoryProp->SetStringField(TEXT("type"), TEXT("string"));
+		CategoryProp->SetStringField(
+			TEXT("description"),
+			TEXT("Optional case-insensitive substring filter on log category (e.g. 'LogPython', 'LogTemp')."));
+		Properties->SetObjectField(TEXT("category"), CategoryProp);
+
+		TSharedPtr<FJsonObject> ContainsProp = MakeShareable(new FJsonObject);
+		ContainsProp->SetStringField(TEXT("type"), TEXT("string"));
+		ContainsProp->SetStringField(
+			TEXT("description"),
+			TEXT("Optional case-insensitive substring filter on log message text (e.g. 'Traceback', 'Error')."));
+		Properties->SetObjectField(TEXT("contains"), ContainsProp);
+
+		TSharedPtr<FJsonObject> ModeProp = MakeShareable(new FJsonObject);
+		ModeProp->SetStringField(TEXT("type"), TEXT("string"));
+		ModeProp->SetStringField(
+			TEXT("description"),
+			TEXT("Read mode: 'tail' (last matching lines, default), 'since_last_read' (only new lines since prior read_log), or 'file' (disk tail from Saved/Logs)."));
+		ModeProp->SetStringField(TEXT("default"), TEXT("tail"));
+		Properties->SetObjectField(TEXT("mode"), ModeProp);
+
+		TSharedPtr<FJsonObject> SourceProp = MakeShareable(new FJsonObject);
+		SourceProp->SetStringField(TEXT("type"), TEXT("string"));
+		SourceProp->SetStringField(
+			TEXT("description"),
+			TEXT("Log source: 'auto' (in-memory session buffer first, file fallback, default), 'memory', or 'file'."));
+		SourceProp->SetStringField(TEXT("default"), TEXT("auto"));
+		Properties->SetObjectField(TEXT("source"), SourceProp);
+
+		ReadLogParams->SetObjectField(TEXT("properties"), Properties);
+
+		Tools.Add(BuildToolObject(
+			TEXT("read_log"),
+			TEXT("Read recent Unreal Editor log output in a token-efficient, filtered way. ")
+			TEXT("Use after failed or ambiguous python_execute calls to inspect errors, warnings, and tracebacks. ")
+			TEXT("Prefer category='LogPython' or contains='Traceback' when debugging Python scripts. ")
+			TEXT("Use mode='since_last_read' when polling logs across retries instead of re-reading the same tail."),
+			ReadLogParams));
 	}
 
 	// OpenAI-hosted web_search and file_search tools (Responses API only, OpenAI endpoint only).
@@ -1502,6 +1292,17 @@ TArray<TSharedPtr<FJsonObject>> UUnrealGPTAgentClient::BuildToolDefinitions()
 			TEXT("After calling this, use python_execute (for example with the 'unrealgpt_mcp_import' helpers) to import the files as Unreal assets, ")
 			TEXT("then verify placement with scene_query and/or viewport_screenshot."),
 			ReplicateParams));
+	}
+
+	// Structured user clarification (always enabled).
+	Tools.Add(FUnrealGPTToolSchemas::BuildClarifyTool(bUseResponsesApi));
+
+	if (Settings && Settings->bEnableMcpTool && Settings->McpServers.Num() > 0)
+	{
+		Tools.Add(FUnrealGPTToolSchemas::BuildMcpListToolsTool(bUseResponsesApi));
+		Tools.Add(FUnrealGPTToolSchemas::BuildMcpCallTool(bUseResponsesApi));
+		Tools.Add(FUnrealGPTToolSchemas::BuildMcpReadResourceTool(bUseResponsesApi));
+		Tools.Add(FUnrealGPTToolSchemas::BuildMcpGetPromptTool(bUseResponsesApi));
 	}
 
 	// New atomic editor tools - purpose-built to reduce reliance on freeform Python
@@ -1710,6 +1511,18 @@ TArray<TSharedPtr<FJsonObject>> UUnrealGPTAgentClient::BuildToolDefinitions()
 			TEXT("Snap an actor to the ground using a line trace. ")
 			TEXT("Wrapped in an editor transaction for Undo support."),
 			SnapParams));
+	}
+
+	if (Settings && Settings->bEnableBlueprintTools)
+	{
+		Tools.Add(FUnrealGPTToolSchemas::BuildBlueprintQueryTool(bUseResponsesApi));
+		Tools.Add(FUnrealGPTToolSchemas::BuildBlueprintCreateTool(bUseResponsesApi));
+		Tools.Add(FUnrealGPTToolSchemas::BuildBlueprintAddVariableTool(bUseResponsesApi));
+		Tools.Add(FUnrealGPTToolSchemas::BuildBlueprintCompileTool(bUseResponsesApi));
+		Tools.Add(FUnrealGPTToolSchemas::BuildBlueprintAddNodeTool(bUseResponsesApi));
+		Tools.Add(FUnrealGPTToolSchemas::BuildBlueprintConnectPinsTool(bUseResponsesApi));
+		Tools.Add(FUnrealGPTToolSchemas::BuildBlueprintRemoveNodeTool(bUseResponsesApi));
+		Tools.Add(FUnrealGPTToolSchemas::BuildBlueprintSetPinDefaultTool(bUseResponsesApi));
 	}
 
 	return Tools;
@@ -1977,8 +1790,22 @@ void UUnrealGPTAgentClient::ProcessStreamingResponse(const FString& ResponseCont
 
 								OnAgentMessage.Broadcast(TEXT("assistant"), AccumulatedContent, TArray<FString>{CurrentToolCallId});
 
+								if (CurrentToolName == TEXT("clarify"))
+								{
+									if (bAwaitingClarifyResponse)
+									{
+										UE_LOG(LogTemp, Warning, TEXT("UnrealGPT: Overwriting pending clarify request %s with %s"),
+											*PendingClarifyCallId, *CurrentToolCallId);
+									}
+
+									PendingClarifyCallId = CurrentToolCallId;
+									bAwaitingClarifyResponse = true;
+									OnToolCall.Broadcast(CurrentToolCallId, TEXT("clarify"), CurrentToolArguments);
+									return;
+								}
+
 								// Execute tool call
-								FString ToolResult = ExecuteToolCall(CurrentToolName, CurrentToolArguments);
+								FString ToolResult = ExecuteToolCall(CurrentToolCallId, CurrentToolName, CurrentToolArguments);
 								
 								// Truncate or summarize large tool results to prevent context window overflow
 								FString ToolResultForHistory = ToolResult;
@@ -2473,15 +2300,16 @@ void UUnrealGPTAgentClient::ProcessResponsesApiResponse(const FString& ResponseC
 			// Broadcast to UI; ensure we hop to the game thread if needed.
 			if (IsInGameThread())
 			{
-				OnToolCall.Broadcast(ToolName, ArgsString);
+				OnToolCall.Broadcast(CallId, ToolName, ArgsString);
 			}
 			else
 			{
+				const FString CallIdCopy = CallId;
 				const FString ToolNameCopy = ToolName;
 				const FString ArgsCopy = ArgsString;
-				AsyncTask(ENamedThreads::GameThread, [this, ToolNameCopy, ArgsCopy]()
+				AsyncTask(ENamedThreads::GameThread, [this, CallIdCopy, ToolNameCopy, ArgsCopy]()
 				{
-					OnToolCall.Broadcast(ToolNameCopy, ArgsCopy);
+					OnToolCall.Broadcast(CallIdCopy, ToolNameCopy, ArgsCopy);
 				});
 			}
 
@@ -2698,7 +2526,8 @@ void UUnrealGPTAgentClient::ProcessResponsesApiResponse(const FString& ResponseC
 		};
 
 		bool bHasClientSideTools = false;
-		bool bHasAsyncReplicateTools = false;
+		bool bHasAsyncTools = false;
+		bool bHasPendingUserInput = false;
 		TArray<FString> ToolResults; // Store results for completion detection
 		TArray<FString> ScreenshotImages; // Viewport screenshots to forward as image input
 		
@@ -2710,16 +2539,48 @@ void UUnrealGPTAgentClient::ProcessResponsesApiResponse(const FString& ResponseC
 			const bool bIsScreenshot = (CallInfo.Name == TEXT("viewport_screenshot"));
 			const bool bIsServerSideTool = IsServerSideTool(CallInfo.Name);
 			const bool bIsAsyncReplicateTool = (CallInfo.Name == TEXT("replicate_generate"));
+			const bool bIsAsyncMcpTool = (CallInfo.Name == TEXT("mcp_call"));
+			const bool bIsAsyncTool = bIsAsyncReplicateTool || bIsAsyncMcpTool;
 
 			if (!bIsServerSideTool)
 			{
 				bHasClientSideTools = true;
 			}
 
-			// For Replicate generation, execute asynchronously on a background thread to avoid blocking the editor.
-			if (bIsAsyncReplicateTool)
+			if (CallInfo.Name == TEXT("clarify"))
 			{
-				bHasAsyncReplicateTools = true;
+				bHasPendingUserInput = true;
+
+				if (bAwaitingClarifyResponse)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("UnrealGPT: Overwriting pending clarify request %s with %s"),
+						*PendingClarifyCallId, *CallInfo.Id);
+				}
+
+				PendingClarifyCallId = CallInfo.Id;
+				bAwaitingClarifyResponse = true;
+
+				if (IsInGameThread())
+				{
+					OnToolCall.Broadcast(CallInfo.Id, TEXT("clarify"), CallInfo.Arguments);
+				}
+				else
+				{
+					const FString CallIdCopy = CallInfo.Id;
+					const FString ArgsCopy = CallInfo.Arguments;
+					AsyncTask(ENamedThreads::GameThread, [this, CallIdCopy, ArgsCopy]()
+					{
+						OnToolCall.Broadcast(CallIdCopy, TEXT("clarify"), ArgsCopy);
+					});
+				}
+
+				break;
+			}
+
+			// For long-running remote tools, execute asynchronously on a background thread.
+			if (bIsAsyncTool)
+			{
+				bHasAsyncTools = true;
 
 				const FString ToolNameCopy = CallInfo.Name;
 				const FString ArgsCopy = CallInfo.Arguments;
@@ -2729,7 +2590,7 @@ void UUnrealGPTAgentClient::ProcessResponsesApiResponse(const FString& ResponseC
 				Async(EAsyncExecution::ThreadPool, [this, ToolNameCopy, ArgsCopy, CallIdCopy, MaxToolResultSizeLocal, bIsScreenshot]()
 				{
 					// Execute the Replicate tool (may block, but only on this background thread).
-					const FString ToolResult = ExecuteToolCall(ToolNameCopy, ArgsCopy);
+					const FString ToolResult = ExecuteToolCall(CallIdCopy, ToolNameCopy, ArgsCopy);
 
 					// Prepare truncated version for history.
 					FString ToolResultForHistory = ToolResult;
@@ -2768,8 +2629,8 @@ void UUnrealGPTAgentClient::ProcessResponsesApiResponse(const FString& ResponseC
 				continue;
 			}
 
-			// Synchronous execution for non-MCP tools (existing behavior).
-			FString ToolResult = ExecuteToolCall(CallInfo.Name, CallInfo.Arguments);
+			// Synchronous execution for local editor and MCP introspection tools.
+			FString ToolResult = ExecuteToolCall(CallInfo.Id, CallInfo.Name, CallInfo.Arguments);
 			ToolResults.Add(ToolResult); // Store for completion detection
 
 			// If this tool captured a viewport screenshot, keep the raw base64 PNG so we can
@@ -2822,9 +2683,15 @@ void UUnrealGPTAgentClient::ProcessResponsesApiResponse(const FString& ResponseC
 
 		// If we scheduled any async Replicate tools, do not continue the conversation here.
 		// The async callbacks will add tool results and call SendMessage("") when ready.
-		if (bHasAsyncReplicateTools)
+		if (bHasAsyncTools)
 		{
-			UE_LOG(LogTemp, Log, TEXT("UnrealGPT: Async Replicate tool calls scheduled; waiting for completion callbacks to continue conversation."));
+			UE_LOG(LogTemp, Log, TEXT("UnrealGPT: Async tool calls scheduled; waiting for completion callbacks to continue conversation."));
+			return;
+		}
+
+		if (bHasPendingUserInput)
+		{
+			UE_LOG(LogTemp, Log, TEXT("UnrealGPT: Clarify tool pending user input."));
 			return;
 		}
 
@@ -2886,7 +2753,7 @@ void UUnrealGPTAgentClient::ProcessResponsesApiResponse(const FString& ResponseC
 	}
 }
 
-FString UUnrealGPTAgentClient::ExecuteToolCall(const FString& ToolName, const FString& ArgumentsJson)
+FString UUnrealGPTAgentClient::ExecuteToolCall(const FString& ToolCallId, const FString& ToolName, const FString& ArgumentsJson)
 {
 	FString Result;
 
@@ -2963,32 +2830,11 @@ FString UUnrealGPTAgentClient::ExecuteToolCall(const FString& ToolName, const FS
 	}
 	else if (ToolName == TEXT("reflection_query"))
 	{
-		TSharedPtr<FJsonObject> ArgsObj;
-		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ArgumentsJson);
-		if (!(FJsonSerializer::Deserialize(Reader, ArgsObj) && ArgsObj.IsValid()))
-		{
-			return TEXT("{\"status\":\"error\",\"message\":\"Failed to parse reflection_query arguments\"}");
-		}
-
-		FString ClassName;
-		if (!ArgsObj->TryGetStringField(TEXT("class_name"), ClassName) || ClassName.IsEmpty())
-		{
-			return TEXT("{\"status\":\"error\",\"message\":\"Missing required field: class_name\"}");
-		}
-
-		// Try to resolve the class by short name first, then by treating the
-		// input as a fully-qualified object path.
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7)
-		UClass* TargetClass = FindFirstObject<UClass>(*ClassName);
-#else
-		UClass* TargetClass = FindObject<UClass>(ANY_PACKAGE, *ClassName);
-#endif
-		if (!TargetClass)
-		{
-			TargetClass = LoadObject<UClass>(nullptr, *ClassName);
-		}
-
-		Result = BuildReflectionSchemaJson(TargetClass);
+		Result = FUnrealGPTReflectionQuery::Query(ArgumentsJson);
+	}
+	else if (ToolName == TEXT("read_log"))
+	{
+		Result = FUnrealGPTLogReader::Query(ArgumentsJson);
 	}
 	// New atomic editor tools
 	else if (ToolName == TEXT("get_actor"))
@@ -3014,6 +2860,38 @@ FString UUnrealGPTAgentClient::ExecuteToolCall(const FString& ToolName, const FS
 	else if (ToolName == TEXT("snap_actor_to_ground"))
 	{
 		Result = UUnrealGPTSceneContext::SnapActorToGround(ArgumentsJson);
+	}
+	else if (ToolName == TEXT("blueprint_query"))
+	{
+		Result = UUnrealGPTBlueprintContext::Query(ArgumentsJson);
+	}
+	else if (ToolName == TEXT("blueprint_create"))
+	{
+		Result = UUnrealGPTBlueprintContext::Create(ArgumentsJson);
+	}
+	else if (ToolName == TEXT("blueprint_add_variable"))
+	{
+		Result = UUnrealGPTBlueprintContext::AddVariable(ArgumentsJson);
+	}
+	else if (ToolName == TEXT("blueprint_compile"))
+	{
+		Result = UUnrealGPTBlueprintContext::Compile(ArgumentsJson);
+	}
+	else if (ToolName == TEXT("blueprint_add_node"))
+	{
+		Result = UUnrealGPTBlueprintContext::AddNode(ArgumentsJson);
+	}
+	else if (ToolName == TEXT("blueprint_connect_pins"))
+	{
+		Result = UUnrealGPTBlueprintContext::ConnectPins(ArgumentsJson);
+	}
+	else if (ToolName == TEXT("blueprint_remove_node"))
+	{
+		Result = UUnrealGPTBlueprintContext::RemoveNode(ArgumentsJson);
+	}
+	else if (ToolName == TEXT("blueprint_set_pin_default"))
+	{
+		Result = UUnrealGPTBlueprintContext::SetPinDefault(ArgumentsJson);
 	}
 	else if (ToolName == TEXT("replicate_generate"))
 	{
@@ -3130,7 +3008,7 @@ FString UUnrealGPTAgentClient::ExecuteToolCall(const FString& ToolName, const FS
 		if (ArgsObj->TryGetStringField(TEXT("input_image"), InputImagePath) && !InputImagePath.IsEmpty())
 		{
 			FString ImageError;
-			FString ImageDataUri = ConvertImageToBase64DataUri(InputImagePath, ImageError);
+			FString ImageDataUri = FUnrealGPTAssetContext::ConvertImageToBase64DataUri(InputImagePath, ImageError);
 			
 			if (ImageDataUri.IsEmpty())
 			{
@@ -3482,8 +3360,27 @@ FString UUnrealGPTAgentClient::ExecuteToolCall(const FString& ToolName, const FS
 			if (!LocalPath.IsEmpty())
 			{
 				TSharedPtr<FJsonObject> FileObj = MakeShareable(new FJsonObject);
+				const FString Ext = FPaths::GetExtension(LocalPath).ToLower();
+				FString MimeType = Ext;
+				if (Ext == TEXT("png")) MimeType = TEXT("image/png");
+				else if (Ext == TEXT("jpg") || Ext == TEXT("jpeg")) MimeType = TEXT("image/jpeg");
+				else if (Ext == TEXT("wav")) MimeType = TEXT("audio/wav");
+				else if (Ext == TEXT("mp3")) MimeType = TEXT("audio/mpeg");
+				else if (Ext == TEXT("fbx")) MimeType = TEXT("model/fbx");
+				else if (Ext == TEXT("glb")) MimeType = TEXT("model/gltf-binary");
+
+				FString InferredUsage = TEXT("file");
+				if (MimeType.StartsWith(TEXT("image/"))) InferredUsage = TEXT("image");
+				else if (MimeType.StartsWith(TEXT("audio/"))) InferredUsage = TEXT("audio");
+				else if (MimeType.StartsWith(TEXT("video/"))) InferredUsage = TEXT("video");
+				else if (OutputKind == TEXT("3d") || OutputKind == TEXT("3d_model") || OutputKind == TEXT("model") || OutputKind == TEXT("mesh")) InferredUsage = TEXT("3d_model");
+				else if (OutputKind == TEXT("image")) InferredUsage = TEXT("image");
+				else if (OutputKind == TEXT("audio")) InferredUsage = TEXT("audio");
+				else if (OutputKind == TEXT("video")) InferredUsage = TEXT("video");
+
 				FileObj->SetStringField(TEXT("local_path"), LocalPath);
-				FileObj->SetStringField(TEXT("mime_type"), FPaths::GetExtension(LocalPath));
+				FileObj->SetStringField(TEXT("mime_type"), MimeType);
+				FileObj->SetStringField(TEXT("inferred_usage"), InferredUsage);
 				FileObj->SetStringField(TEXT("description"), TEXT("Downloaded output from Replicate prediction"));
 				FilesArray.Add(MakeShareable(new FJsonValueObject(FileObj)));
 			}
@@ -3512,6 +3409,50 @@ FString UUnrealGPTAgentClient::ExecuteToolCall(const FString& ToolName, const FS
 
 		Result = ResultJsonString;
 	}
+	else if (ToolName == TEXT("mcp_list_tools"))
+	{
+		if (UUnrealGPTMcpSubsystem* McpSubsystem = GEditor ? GEditor->GetEditorSubsystem<UUnrealGPTMcpSubsystem>() : nullptr)
+		{
+			Result = McpSubsystem->ExecuteMcpListTools(ArgumentsJson);
+		}
+		else
+		{
+			Result = TEXT("{\"status\":\"error\",\"message\":\"MCP subsystem is not available\"}");
+		}
+	}
+	else if (ToolName == TEXT("mcp_call"))
+	{
+		if (UUnrealGPTMcpSubsystem* McpSubsystem = GEditor ? GEditor->GetEditorSubsystem<UUnrealGPTMcpSubsystem>() : nullptr)
+		{
+			Result = McpSubsystem->ExecuteMcpCall(ArgumentsJson);
+		}
+		else
+		{
+			Result = TEXT("{\"status\":\"error\",\"message\":\"MCP subsystem is not available\"}");
+		}
+	}
+	else if (ToolName == TEXT("mcp_read_resource"))
+	{
+		if (UUnrealGPTMcpSubsystem* McpSubsystem = GEditor ? GEditor->GetEditorSubsystem<UUnrealGPTMcpSubsystem>() : nullptr)
+		{
+			Result = McpSubsystem->ExecuteMcpReadResource(ArgumentsJson);
+		}
+		else
+		{
+			Result = TEXT("{\"status\":\"error\",\"message\":\"MCP subsystem is not available\"}");
+		}
+	}
+	else if (ToolName == TEXT("mcp_get_prompt"))
+	{
+		if (UUnrealGPTMcpSubsystem* McpSubsystem = GEditor ? GEditor->GetEditorSubsystem<UUnrealGPTMcpSubsystem>() : nullptr)
+		{
+			Result = McpSubsystem->ExecuteMcpGetPrompt(ArgumentsJson);
+		}
+		else
+		{
+			Result = TEXT("{\"status\":\"error\",\"message\":\"MCP subsystem is not available\"}");
+		}
+	}
 	else if (ToolName == TEXT("file_search") || ToolName == TEXT("web_search"))
 	{
 		// These are server-side tools executed by the model/platform. 
@@ -3536,15 +3477,16 @@ FString UUnrealGPTAgentClient::ExecuteToolCall(const FString& ToolName, const FS
 	// Ensure OnToolCall delegate (which can touch Slate/UI) is always broadcast on the game thread.
 	if (IsInGameThread())
 	{
-		OnToolCall.Broadcast(ToolName, ArgumentsJson);
+		OnToolCall.Broadcast(ToolCallId, ToolName, ArgumentsJson);
 	}
 	else
 	{
+		const FString ToolCallIdCopy = ToolCallId;
 		const FString ToolNameCopy = ToolName;
 		const FString ArgsCopy = ArgumentsJson;
-		AsyncTask(ENamedThreads::GameThread, [this, ToolNameCopy, ArgsCopy]()
+		AsyncTask(ENamedThreads::GameThread, [this, ToolCallIdCopy, ToolNameCopy, ArgsCopy]()
 		{
-			OnToolCall.Broadcast(ToolNameCopy, ArgsCopy);
+			OnToolCall.Broadcast(ToolCallIdCopy, ToolNameCopy, ArgsCopy);
 		});
 	}
 
@@ -4042,15 +3984,15 @@ bool UUnrealGPTAgentClient::DetectTaskCompletion(const TArray<FString>& ToolName
 				}
 			}
 		}
-		else if (ToolName == TEXT("replicate_generate"))
+		else if (ToolName == TEXT("replicate_generate") || ToolName == TEXT("mcp_call"))
 		{
-			// Check if Replicate call succeeded and produced files
+			// Check if generation/MCP call succeeded and produced files
 			TSharedPtr<FJsonObject> ResultObj;
 			TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ToolResult);
 			if (FJsonSerializer::Deserialize(Reader, ResultObj) && ResultObj.IsValid())
 			{
 				FString Status;
-				if (ResultObj->TryGetStringField(TEXT("status"), Status) && Status == TEXT("success"))
+				if (ResultObj->TryGetStringField(TEXT("status"), Status) && (Status == TEXT("success") || Status == TEXT("ok")))
 				{
 					// Check if files were downloaded
 					const TSharedPtr<FJsonObject>* DetailsObj = nullptr;

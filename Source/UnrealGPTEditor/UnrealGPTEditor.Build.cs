@@ -1,6 +1,7 @@
 // Copyright (c) 2025 TREE Industries.
 
 using UnrealBuildTool;
+using System.IO;
 
 public class UnrealGPTEditor : ModuleRules
 {
@@ -15,6 +16,8 @@ public class UnrealGPTEditor : ModuleRules
 				
 		PrivateIncludePaths.AddRange(
 			new string[] {
+				ModuleDirectory,
+				Path.Combine(ModuleDirectory, "Mcp")
 			}
 		);
 			
@@ -55,7 +58,13 @@ public class UnrealGPTEditor : ModuleRules
 				"AudioCaptureCore",
 				"AudioMixer",
 				"RHI",
-				"RenderCore"
+				"RenderCore",
+				"AssetRegistry",
+				"ImageWrapper",
+				"BlueprintGraph",
+				"Kismet",
+				"KismetCompiler",
+				"AssetTools"
 			}
 		);
 	}

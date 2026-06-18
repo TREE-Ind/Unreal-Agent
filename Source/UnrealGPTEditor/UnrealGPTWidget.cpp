@@ -1,6 +1,7 @@
 // Copyright (c) 2025 TREE Industries.
 
 #include "UnrealGPTWidget.h"
+#include "Editor.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SSeparator.h"
@@ -16,10 +17,12 @@
 #include "Styling/SlateTypes.h"
 #include "Styling/StyleColors.h"
 #include "UnrealGPTSettings.h"
+#include "Mcp/UnrealGPTMcpSubsystem.h"
 #include "ISettingsModule.h"
 #include "Misc/Base64.h"
 #include "UnrealGPTSceneContext.h"
 #include "UnrealGPTWidgetDelegateHandler.h"
+#include "SUnrealGPTClarifyWidget.h"
 #include "Framework/Text/SlateTextRun.h"
 #include "Framework/Text/SlateTextLayout.h"
 #include "Widgets/Layout/SSpacer.h"
@@ -40,6 +43,9 @@
 #include "GenericPlatform/GenericPlatformHttp.h"
 #include "Widgets/Layout/SWrapBox.h"
 #include "Widgets/SOverlay.h"
+#include "AssetThumbnail.h"
+#include "DragAndDrop/AssetDragDropOp.h"
+#include "UnrealGPTAssetContext.h"
 
 namespace UnrealGPTAgentUI
 {
@@ -306,6 +312,8 @@ void SUnrealGPTWidget::Construct(const FArguments& InArgs)
 	VoiceInput->OnRecordingStarted.AddDynamic(DelegateHandler, &UUnrealGPTWidgetDelegateHandler::OnRecordingStartedReceived);
 	VoiceInput->OnRecordingStopped.AddDynamic(DelegateHandler, &UUnrealGPTWidgetDelegateHandler::OnRecordingStoppedReceived);
 
+	AssetThumbnailPool = MakeShareable(new FAssetThumbnailPool(32, false));
+
 	ChildSlot
 	[
 		SNew(SBorder)
@@ -348,6 +356,16 @@ void SUnrealGPTWidget::Construct(const FArguments& InArgs)
 								.Font(UnrealGPTAgentUI::CaptionFont())
 								.ColorAndOpacity(FStyleColors::Foreground)
 								.AutoWrapText(true)
+							]
+							+ SVerticalBox::Slot()
+							.AutoHeight()
+							.Padding(FMargin(0.0f, 2.0f, 0.0f, 0.0f))
+							[
+								SAssignNew(McpStatusLabel, STextBlock)
+								.Text(FText::GetEmpty())
+								.Font(UnrealGPTAgentUI::CaptionFont())
+								.ColorAndOpacity(FStyleColors::AccentGreen)
+								.Visibility(EVisibility::Collapsed)
 							]
 						]
 						+ SHorizontalBox::Slot()
@@ -575,7 +593,7 @@ void SUnrealGPTWidget::Construct(const FArguments& InArgs)
 				.Padding(FMargin(UnrealGPTAgentUI::SpaceXs, UnrealGPTAgentUI::SpaceXs))
 				.Visibility_Lambda([this]() -> EVisibility
 				{
-					return PendingAttachedImages.Num() > 0 ? EVisibility::Visible : EVisibility::Collapsed;
+					return HasPendingAttachments() ? EVisibility::Visible : EVisibility::Collapsed;
 				})
 				[
 					SAssignNew(AttachmentPreviewBox, SWrapBox)
@@ -628,7 +646,7 @@ void SUnrealGPTWidget::Construct(const FArguments& InArgs)
 								.Padding(FMargin(0.0f, UnrealGPTAgentUI::SpaceXs, 0.0f, 0.0f))
 								[
 									SNew(STextBlock)
-									.Text(NSLOCTEXT("UnrealGPT", "EmptyThreadBody", "Describe a goal, attach reference images, or capture the viewport as context. Quick starts use the same actions as the toolbar."))
+									.Text(NSLOCTEXT("UnrealGPT", "EmptyThreadBody", "Describe a goal, attach reference images, drag assets from the Content Browser, or capture the viewport as context. Quick starts use the same actions as the toolbar."))
 									.Font(UnrealGPTAgentUI::BodyFont())
 									.ColorAndOpacity(FStyleColors::Foreground)
 									.AutoWrapText(true)
@@ -792,16 +810,11 @@ void SUnrealGPTWidget::Construct(const FArguments& InArgs)
 							SNew(STextBlock)
 							.Visibility_Lambda([this]() -> EVisibility
 							{
-								return PendingAttachedImages.Num() > 0 ? EVisibility::Visible : EVisibility::Collapsed;
+								return HasPendingAttachments() ? EVisibility::Visible : EVisibility::Collapsed;
 							})
 							.Text_Lambda([this]() -> FText
 							{
-								const int32 Count = PendingAttachedImages.Num();
-								if (Count == 1)
-								{
-									return NSLOCTEXT("UnrealGPT", "OneImageAttached", "1 image attached");
-								}
-								return FText::FromString(FString::Printf(TEXT("%d images attached"), Count));
+								return GetAttachmentSummaryText();
 							})
 							.Font(FAppStyle::GetFontStyle("SmallFontItalic"))
 							.ColorAndOpacity(UnrealGPTAgentUI::AccentBlueHint)
@@ -819,13 +832,18 @@ void SUnrealGPTWidget::Construct(const FArguments& InArgs)
 							SNew(SBox)
 							.MinDesiredHeight(100.0f)
 							[
-								SNew(SBorder)
+								SAssignNew(ComposerInputBorder, SBorder)
 								.BorderImage(FAppStyle::GetBrush("Brushes.White"))
-								.BorderBackgroundColor(FStyleColors::Input)
+								.BorderBackgroundColor_Lambda([this]() -> FSlateColor
+								{
+									return bAssetDragActive
+										? FSlateColor(UnrealGPTAgentUI::AccentBlueHint)
+										: FSlateColor(FStyleColors::Input);
+								})
 								.Padding(FMargin(UnrealGPTAgentUI::SpaceSm, 12.0f))
 								[
 									SAssignNew(InputTextBox, SMultiLineEditableTextBox)
-									.HintText(NSLOCTEXT("UnrealGPT", "InputHint", "Ask UnrealGPT anything... (Ctrl+Enter to send)"))
+									.HintText(NSLOCTEXT("UnrealGPT", "InputHint", "Ask UnrealGPT anything... (Ctrl+Enter to send, or drag assets from Content Browser)"))
 									.Font(UnrealGPTAgentUI::BodyFont())
 									.Margin(FMargin(0.0f))
 									.OnKeyDownHandler_Lambda([this](const FGeometry&, const FKeyEvent& KeyEvent) -> FReply
@@ -993,6 +1011,39 @@ void SUnrealGPTWidget::Tick(const FGeometry& AllottedGeometry, const double InCu
 		&& InCurrentTime >= CodexNextPollTime)
 	{
 		PollCodexDeviceAuthToken();
+	}
+
+	if (bAgentIsRunning && AgentClient && AgentClient->IsAwaitingClarifyResponse() && SessionStatusLabel.IsValid())
+	{
+		SessionStatusLabel->SetText(NSLOCTEXT("UnrealGPT", "SessionStatusWaiting", "Waiting for input"));
+	}
+
+	if (McpStatusLabel.IsValid())
+	{
+		const UUnrealGPTSettings* Settings = GetDefault<UUnrealGPTSettings>();
+		if (Settings && Settings->bEnableMcpTool && Settings->McpServers.Num() > 0)
+		{
+			int32 Connected = 0;
+			int32 Total = 0;
+			if (GEditor)
+			{
+				if (const UUnrealGPTMcpSubsystem* McpSubsystem = GEditor->GetEditorSubsystem<UUnrealGPTMcpSubsystem>())
+				{
+					Connected = McpSubsystem->GetConnectedServerCount();
+					Total = McpSubsystem->GetServerStatuses().Num();
+				}
+			}
+
+			McpStatusLabel->SetText(FText::Format(
+				NSLOCTEXT("UnrealGPT", "McpStatus", "MCP: {0}/{1} connected"),
+				FText::AsNumber(Connected),
+				FText::AsNumber(Total)));
+			McpStatusLabel->SetVisibility(EVisibility::Visible);
+		}
+		else
+		{
+			McpStatusLabel->SetVisibility(EVisibility::Collapsed);
+		}
 	}
 }
 
@@ -1388,6 +1439,78 @@ TSharedRef<SWidget> SUnrealGPTWidget::CreateToolSpecificWidget(const FString& To
 				.AutoWrapText(true)
 			];
 	}
+	else if (ToolName == TEXT("read_log"))
+	{
+		ToolColor = FLinearColor(0.55f, 0.65f, 0.75f, 1.0f);
+		ToolIcon = FString(TEXT("\xf15c")); // File-text icon
+		ToolDisplayName = TEXT("Read Log");
+
+		FString FilterSummary;
+		TSharedPtr<FJsonObject> ArgsObj;
+		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Arguments);
+		if (FJsonSerializer::Deserialize(Reader, ArgsObj) && ArgsObj.IsValid())
+		{
+			FString MinVerbosity;
+			if (ArgsObj->TryGetStringField(TEXT("min_verbosity"), MinVerbosity) && !MinVerbosity.IsEmpty())
+			{
+				FilterSummary += FString::Printf(TEXT("• min_verbosity: %s\n"), *MinVerbosity);
+			}
+			FString Category;
+			if (ArgsObj->TryGetStringField(TEXT("category"), Category) && !Category.IsEmpty())
+			{
+				FilterSummary += FString::Printf(TEXT("• category: \"%s\"\n"), *Category);
+			}
+			FString Contains;
+			if (ArgsObj->TryGetStringField(TEXT("contains"), Contains) && !Contains.IsEmpty())
+			{
+				FilterSummary += FString::Printf(TEXT("• contains: \"%s\"\n"), *Contains);
+			}
+			FString Mode;
+			if (ArgsObj->TryGetStringField(TEXT("mode"), Mode) && !Mode.IsEmpty())
+			{
+				FilterSummary += FString::Printf(TEXT("• mode: %s\n"), *Mode);
+			}
+		}
+
+		if (!Result.IsEmpty())
+		{
+			TSharedPtr<FJsonObject> ResultObj;
+			TSharedRef<TJsonReader<>> ResultReader = TJsonReaderFactory<>::Create(Result);
+			if (FJsonSerializer::Deserialize(ResultReader, ResultObj) && ResultObj.IsValid())
+			{
+				double LineCount = 0.0;
+				if (ResultObj->TryGetNumberField(TEXT("line_count"), LineCount))
+				{
+					FilterSummary += FString::Printf(TEXT("• lines returned: %d\n"), static_cast<int32>(LineCount));
+				}
+			}
+		}
+
+		if (FilterSummary.IsEmpty())
+		{
+			FilterSummary = TEXT("Default filters (warnings and above, last 40 lines)");
+		}
+
+		ContentWidget = SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			[
+				SNew(STextBlock)
+				.Text(NSLOCTEXT("UnrealGPT", "LogFilters", "Log query:"))
+				.Font(UnrealGPTAgentUI::CaptionFont())
+				.ColorAndOpacity(FStyleColors::Foreground)
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 4.0f, 0.0f, 0.0f)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(FilterSummary.TrimEnd()))
+				.Font(UnrealGPTAgentUI::BodyFont())
+				.ColorAndOpacity(FStyleColors::Foreground)
+				.AutoWrapText(true)
+			];
+	}
 	else if (ToolName == TEXT("viewport_screenshot"))
 	{
 		ToolColor = FLinearColor(1.0f, 0.478f, 0.239f, 1.0f); // DESIGN gradient-orange
@@ -1678,6 +1801,125 @@ TSharedRef<SWidget> SUnrealGPTWidget::CreateToolSpecificWidget(const FString& To
 	return WrapThreadTurn(ToolInner, HAlign_Left);
 }
 
+TSharedRef<SWidget> SUnrealGPTWidget::CreateClarifyTurnWidget(const FString& ToolCallId, const FString& Arguments)
+{
+	const FLinearColor ToolColor = FLinearColor(0.0f, 0.6f, 1.0f, 1.0f);
+	const FString ToolIcon = FString(TEXT("\xf059"));
+	const FString ToolDisplayName = TEXT("Clarification");
+
+	FClarifyRequest ParsedRequest;
+	FUnrealGPTClarifyTypes::ParseRequest(Arguments, ParsedRequest);
+	ClarifyRequestsByToolCallId.Add(ToolCallId, ParsedRequest);
+
+	const TSharedRef<SWidget> ClarifyInner =
+		SNew(SBorder)
+		.BorderImage(FAppStyle::GetBrush("Brushes.White"))
+		.BorderBackgroundColor(FStyleColors::Panel)
+		.Padding(FMargin(UnrealGPTAgentUI::SpaceMd, UnrealGPTAgentUI::SpaceSm))
+		[
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.Padding(0.0f, 0.0f, UnrealGPTAgentUI::SpaceSm, 0.0f)
+			[
+				SNew(SBox)
+				.WidthOverride(4.0f)
+				.MinDesiredHeight(48.0f)
+				[
+					SNew(SBorder)
+					.BorderImage(FAppStyle::GetBrush("WhiteBorder"))
+					.BorderBackgroundColor(ToolColor)
+					.Padding(0.0f)
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, UnrealGPTAgentUI::SpaceXs)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					.Padding(0.0f, 0.0f, 8.0f, 0.0f)
+					[
+						SNew(SBox)
+						.WidthOverride(24.0f)
+						.HeightOverride(24.0f)
+						[
+							SNew(SBorder)
+							.BorderImage(FAppStyle::GetBrush("Brushes.White"))
+							.BorderBackgroundColor(ToolColor)
+							.Padding(0.0f)
+							.HAlign(HAlign_Center)
+							.VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+								.Font(FAppStyle::Get().GetFontStyle("FontAwesome.11"))
+								.Text(FText::FromString(ToolIcon))
+								.ColorAndOpacity(FStyleColors::ForegroundInverted)
+							]
+						]
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(NSLOCTEXT("UnrealGPT", "ClarifyLaneEyebrow", "INPUT"))
+						.Font(UnrealGPTAgentUI::CaptionFont())
+						.ColorAndOpacity(FStyleColors::Foreground)
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					.Padding(10.0f, 0.0f, 10.0f, 0.0f)
+					[
+						SNew(STextBlock)
+						.Text(FText::FromString(ToolDisplayName))
+						.Font(UnrealGPTAgentUI::BodyBoldFont())
+						.ColorAndOpacity(ToolColor)
+					]
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					[
+						SNew(SSpacer)
+						.Size(FVector2D(1.0f, 1.0f))
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					[
+						SNew(SBorder)
+						.BorderImage(FAppStyle::GetBrush("Brushes.White"))
+						.BorderBackgroundColor(FStyleColors::Input)
+						.Padding(FMargin(10.0f, 4.0f))
+						[
+							SNew(STextBlock)
+							.Text(NSLOCTEXT("UnrealGPT", "ClarifyAwaiting", "Awaiting input"))
+							.Font(FAppStyle::GetFontStyle("SmallFont"))
+							.ColorAndOpacity(FStyleColors::Foreground)
+						]
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(2.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(SUnrealGPTClarifyWidget)
+					.ToolCallId(ToolCallId)
+					.ArgumentsJson(Arguments)
+					.AgentClient(AgentClient)
+				]
+			]
+		];
+
+	return WrapThreadTurn(ClarifyInner, HAlign_Left);
+}
+
 TSharedRef<SWidget> SUnrealGPTWidget::CreateToolCallWidget(const FString& ToolName, const FString& Arguments, const FString& Result)
 {
 	return CreateToolSpecificWidget(ToolName, Arguments, Result);
@@ -1721,7 +1963,8 @@ FReply SUnrealGPTWidget::OnSendOrStopClicked()
 
 	FString Message = InputTextBox->GetText().ToString();
 	const bool bHasImages = PendingAttachedImages.Num() > 0;
-	if (Message.IsEmpty() && !bHasImages)
+	const bool bHasAssets = PendingAttachedAssets.Num() > 0;
+	if (Message.IsEmpty() && !bHasImages && !bHasAssets)
 	{
 		return FReply::Handled();
 	}
@@ -1730,9 +1973,20 @@ FReply SUnrealGPTWidget::OnSendOrStopClicked()
 	if (ChatHistoryBox.IsValid())
 	{
 		FString DisplayMessage = Message;
-		if (DisplayMessage.IsEmpty() && bHasImages)
+		if (DisplayMessage.IsEmpty())
 		{
-			DisplayMessage = TEXT("[Image attached]");
+			if (bHasAssets && bHasImages)
+			{
+				DisplayMessage = TEXT("[UE asset(s) and image(s) attached]");
+			}
+			else if (bHasAssets)
+			{
+				DisplayMessage = TEXT("[UE asset(s) attached]");
+			}
+			else if (bHasImages)
+			{
+				DisplayMessage = TEXT("[Image attached]");
+			}
 		}
 
 		AddConversationTurnWidget(CreateMessageWidget(TEXT("user"), DisplayMessage), FMargin(UnrealGPTAgentUI::SpaceXs));
@@ -1744,8 +1998,17 @@ FReply SUnrealGPTWidget::OnSendOrStopClicked()
 	// Mark agent as running before sending
 	SetAgentRunning(true);
 
+	FString OutgoingMessage = Message;
+	if (bHasAssets)
+	{
+		OutgoingMessage += FUnrealGPTAssetContext::BuildContextAppendix(PendingAttachedAssets);
+	}
+
+	TArray<FString> ImagesToSend = PendingAttachedImages;
+	ImagesToSend.Append(FUnrealGPTAssetContext::GetTextureBase64Images(PendingAttachedAssets));
+
 	// Send to agent
-	AgentClient->SendMessage(Message, PendingAttachedImages);
+	AgentClient->SendMessage(OutgoingMessage, ImagesToSend);
 
 	// Show reasoning indicator while the agent is working
 	if (ReasoningStatusBorder.IsValid())
@@ -1757,9 +2020,11 @@ FReply SUnrealGPTWidget::OnSendOrStopClicked()
 		ReasoningSummaryText->SetText(NSLOCTEXT("UnrealGPT", "ReasoningPendingShort", "Thinking..."));
 	}
 
-	// Clear any pending images after sending
+	// Clear any pending attachments after sending
 	PendingAttachedImages.Empty();
+	PendingAttachedAssets.Empty();
 	AttachmentBrushes.Empty();
+	AssetThumbnailWidgets.Empty();
 	if (AttachmentPreviewBox.IsValid())
 	{
 		AttachmentPreviewBox->ClearChildren();
@@ -1824,13 +2089,16 @@ FReply SUnrealGPTWidget::OnClearHistoryClicked()
 
 	// Also clear any pending attachments
 	PendingAttachedImages.Empty();
+	PendingAttachedAssets.Empty();
 	AttachmentBrushes.Empty();
+	AssetThumbnailWidgets.Empty();
 	if (AttachmentPreviewBox.IsValid())
 	{
 		AttachmentPreviewBox->ClearChildren();
 	}
 
 	ToolCallHistory.Empty();
+	ClarifyRequestsByToolCallId.Empty();
 
 	// Hide reasoning status as the conversation has been reset
 	if (ReasoningStatusBorder.IsValid())
@@ -2333,28 +2601,8 @@ FReply SUnrealGPTWidget::OnAttachImageClicked()
 					Brush->SetResourceObject(Texture);
 					Brush->ImageSize = FVector2D(Width, Height);
 					Brush->ImageType = ESlateBrushImageType::FullColor;
-
 					AttachmentBrushes.Add(Brush);
-
-					if (AttachmentPreviewBox.IsValid())
-					{
-						AttachmentPreviewBox->AddSlot()
-						[
-							SNew(SBorder)
-							.BorderImage(FAppStyle::GetBrush("Brushes.Recessed"))
-							.BorderBackgroundColor(FStyleColors::Input)
-							.Padding(FMargin(UnrealGPTAgentUI::SpaceXs * 0.25f))
-							[
-								SNew(SBox)
-								.WidthOverride(72.0f)
-								.HeightOverride(72.0f)
-								[
-									SNew(SImage)
-									.Image(Brush.Get())
-								]
-							]
-						];
-					}
+					RefreshAttachmentPreviews();
 				}
 			}
 		}
@@ -2378,7 +2626,220 @@ bool SUnrealGPTWidget::IsSendOrStopEnabled() const
 	}
 
 	FString Text = InputTextBox->GetText().ToString();
-	return !Text.IsEmpty() || PendingAttachedImages.Num() > 0;
+	return !Text.IsEmpty() || HasPendingAttachments();
+}
+
+bool SUnrealGPTWidget::HasPendingAttachments() const
+{
+	return PendingAttachedImages.Num() > 0 || PendingAttachedAssets.Num() > 0;
+}
+
+FText SUnrealGPTWidget::GetAttachmentSummaryText() const
+{
+	const int32 ImageCount = PendingAttachedImages.Num();
+	const int32 AssetCount = PendingAttachedAssets.Num();
+
+	if (ImageCount > 0 && AssetCount > 0)
+	{
+		return FText::FromString(FString::Printf(
+			TEXT("%d image%s, %d asset%s attached"),
+			ImageCount, ImageCount == 1 ? TEXT("") : TEXT("s"),
+			AssetCount, AssetCount == 1 ? TEXT("") : TEXT("s")));
+	}
+
+	if (AssetCount > 0)
+	{
+		return AssetCount == 1
+			? NSLOCTEXT("UnrealGPT", "OneAssetAttached", "1 asset attached")
+			: FText::FromString(FString::Printf(TEXT("%d assets attached"), AssetCount));
+	}
+
+	if (ImageCount == 1)
+	{
+		return NSLOCTEXT("UnrealGPT", "OneImageAttached", "1 image attached");
+	}
+
+	return FText::FromString(FString::Printf(TEXT("%d images attached"), ImageCount));
+}
+
+FReply SUnrealGPTWidget::OnDragOver(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent)
+{
+	if (FUnrealGPTAssetContext::CanAcceptDragDrop(DragDropEvent))
+	{
+		bAssetDragActive = true;
+		if (ComposerInputBorder.IsValid())
+		{
+			ComposerInputBorder->Invalidate(EInvalidateWidget::Paint);
+		}
+		return FReply::Handled();
+	}
+
+	return FReply::Unhandled();
+}
+
+FReply SUnrealGPTWidget::OnDrop(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent)
+{
+	bAssetDragActive = false;
+	if (ComposerInputBorder.IsValid())
+	{
+		ComposerInputBorder->Invalidate(EInvalidateWidget::Paint);
+	}
+
+	const TArray<FAssetData> DroppedAssets = FUnrealGPTAssetContext::ExtractAssetsFromDragDrop(DragDropEvent);
+	if (DroppedAssets.Num() > 0)
+	{
+		AddAttachedAssets(DroppedAssets);
+		return FReply::Handled();
+	}
+
+	return FReply::Unhandled();
+}
+
+void SUnrealGPTWidget::OnDragLeave(const FDragDropEvent& DragDropEvent)
+{
+	SCompoundWidget::OnDragLeave(DragDropEvent);
+	bAssetDragActive = false;
+	if (ComposerInputBorder.IsValid())
+	{
+		ComposerInputBorder->Invalidate(EInvalidateWidget::Paint);
+	}
+}
+
+void SUnrealGPTWidget::AddAttachedAssets(const TArray<FAssetData>& Assets)
+{
+	int32 SkippedCount = 0;
+	FUnrealGPTAssetContext::MergeAssets(PendingAttachedAssets, Assets, SkippedCount);
+
+	if (SkippedCount > 0)
+	{
+		AppendSystemMessage(FString::Printf(
+			TEXT("Attachment limit reached (%d assets max). %d asset(s) were not added."),
+			FUnrealGPTAssetContext::MaxAttachedAssets,
+			SkippedCount));
+	}
+
+	if (PendingAttachedAssets.Num() > 0)
+	{
+		RefreshAttachmentPreviews();
+		if (SendStopButton.IsValid())
+		{
+			SendStopButton->Invalidate(EInvalidateWidget::LayoutAndVolatility);
+		}
+	}
+}
+
+FReply SUnrealGPTWidget::OnRemoveAttachedAsset(int32 AssetIndex)
+{
+	if (PendingAttachedAssets.IsValidIndex(AssetIndex))
+	{
+		PendingAttachedAssets.RemoveAt(AssetIndex);
+		RefreshAttachmentPreviews();
+		if (SendStopButton.IsValid())
+		{
+			SendStopButton->Invalidate(EInvalidateWidget::LayoutAndVolatility);
+		}
+	}
+	return FReply::Handled();
+}
+
+void SUnrealGPTWidget::RefreshAttachmentPreviews()
+{
+	if (!AttachmentPreviewBox.IsValid())
+	{
+		return;
+	}
+
+	AttachmentPreviewBox->ClearChildren();
+	AssetThumbnailWidgets.Empty();
+
+	for (int32 ImageIndex = 0; ImageIndex < AttachmentBrushes.Num(); ++ImageIndex)
+	{
+		const TSharedPtr<FSlateBrush>& Brush = AttachmentBrushes[ImageIndex];
+		if (!Brush.IsValid())
+		{
+			continue;
+		}
+
+		AttachmentPreviewBox->AddSlot()
+		[
+			SNew(SBorder)
+			.BorderImage(FAppStyle::GetBrush("Brushes.Recessed"))
+			.Padding(4.0f)
+			[
+				SNew(SBox)
+				.WidthOverride(72.0f)
+				.HeightOverride(72.0f)
+				[
+					SNew(SImage)
+					.Image(Brush.Get())
+				]
+			]
+		];
+	}
+
+	if (!AssetThumbnailPool.IsValid())
+	{
+		return;
+	}
+
+	for (int32 AssetIndex = 0; AssetIndex < PendingAttachedAssets.Num(); ++AssetIndex)
+	{
+		const FAssetData& AssetData = PendingAttachedAssets[AssetIndex];
+		TSharedPtr<FAssetThumbnail> Thumbnail = MakeShareable(
+			new FAssetThumbnail(AssetData, 72, 72, AssetThumbnailPool));
+		AssetThumbnailWidgets.Add(Thumbnail);
+
+		FAssetThumbnailConfig ThumbnailConfig;
+		ThumbnailConfig.ThumbnailLabel = EThumbnailLabel::AssetName;
+
+		AttachmentPreviewBox->AddSlot()
+		[
+			SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			[
+				SNew(SOverlay)
+				+ SOverlay::Slot()
+				[
+					SNew(SBorder)
+					.BorderImage(FAppStyle::GetBrush("Brushes.Recessed"))
+					.Padding(4.0f)
+					[
+						Thumbnail->MakeThumbnailWidget(ThumbnailConfig)
+					]
+				]
+				+ SOverlay::Slot()
+				.HAlign(HAlign_Right)
+				.VAlign(VAlign_Top)
+				.Padding(0.0f)
+				[
+					SNew(SButton)
+					.ButtonStyle(FAppStyle::Get(), "SimpleButton")
+					.ContentPadding(FMargin(2.0f))
+					.OnClicked_Lambda([this, AssetIndex]() -> FReply
+					{
+						return OnRemoveAttachedAsset(AssetIndex);
+					})
+					[
+						SNew(STextBlock)
+						.Font(FAppStyle::Get().GetFontStyle("FontAwesome.10"))
+						.Text(FText::FromString(FString(TEXT("\xf00d"))))
+						.ColorAndOpacity(FStyleColors::Foreground)
+					]
+				]
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(FMargin(0.0f, 2.0f, 0.0f, 0.0f))
+			[
+				SNew(STextBlock)
+				.Text(FText::FromName(AssetData.AssetName))
+				.Font(FAppStyle::GetFontStyle("SmallFont"))
+				.ColorAndOpacity(FStyleColors::Foreground)
+				.Justification(ETextJustify::Center)
+			]
+		];
+	}
 }
 
 void SUnrealGPTWidget::SetAgentRunning(bool bRunning)
@@ -2387,9 +2848,16 @@ void SUnrealGPTWidget::SetAgentRunning(bool bRunning)
 
 	if (SessionStatusLabel.IsValid())
 	{
-		SessionStatusLabel->SetText(bRunning
-			? NSLOCTEXT("UnrealGPT", "SessionStatusRunning", "Running")
-			: NSLOCTEXT("UnrealGPT", "SessionStatusIdle", "Ready"));
+		if (bRunning && AgentClient && AgentClient->IsAwaitingClarifyResponse())
+		{
+			SessionStatusLabel->SetText(NSLOCTEXT("UnrealGPT", "SessionStatusWaiting", "Waiting for input"));
+		}
+		else
+		{
+			SessionStatusLabel->SetText(bRunning
+				? NSLOCTEXT("UnrealGPT", "SessionStatusRunning", "Running")
+				: NSLOCTEXT("UnrealGPT", "SessionStatusIdle", "Ready"));
+		}
 	}
 
 	// Refresh the button appearance
@@ -2471,16 +2939,28 @@ void SUnrealGPTWidget::HandleAgentReasoning(const FString& ReasoningContent)
 	}
 }
 
-void SUnrealGPTWidget::HandleToolCall(const FString& ToolName, const FString& Arguments)
+void SUnrealGPTWidget::HandleToolCall(const FString& ToolCallId, const FString& ToolName, const FString& Arguments)
 {
 	// Add tool call to history list (internal tracking)
 	FString ToolCallInfo = FString::Printf(TEXT("Tool: %s\nArguments: %s"), *ToolName, *Arguments);
 	ToolCallHistory.Add(ToolCallInfo);
 
+	if (ToolName == TEXT("clarify"))
+	{
+		SetAgentRunning(true);
+	}
+
 	// Add visual representation to chat
 	if (ChatHistoryBox.IsValid())
 	{
-		AddConversationTurnWidget(CreateToolSpecificWidget(ToolName, Arguments, TEXT("")), FMargin(12.0f, 6.0f, 12.0f, 10.0f));
+		if (ToolName == TEXT("clarify"))
+		{
+			AddConversationTurnWidget(CreateClarifyTurnWidget(ToolCallId, Arguments), FMargin(12.0f, 6.0f, 12.0f, 10.0f));
+		}
+		else
+		{
+			AddConversationTurnWidget(CreateToolSpecificWidget(ToolName, Arguments, TEXT("")), FMargin(12.0f, 6.0f, 12.0f, 10.0f));
+		}
 	}
 }
 
@@ -2493,6 +2973,15 @@ void SUnrealGPTWidget::HandleToolResult(const FString& ToolCallId, const FString
 		return;
 	}
 
+	bool bIsClarifyResult = false;
+	FClarifyRequest ClarifyRequest;
+	if (const FClarifyRequest* FoundClarify = ClarifyRequestsByToolCallId.Find(ToolCallId))
+	{
+		bIsClarifyResult = true;
+		ClarifyRequest = *FoundClarify;
+		ClarifyRequestsByToolCallId.Remove(ToolCallId);
+	}
+
 	// Check if this is a base64-encoded screenshot (PNG)
 	bool bIsScreenshot = false;
 	if (Trimmed.StartsWith(TEXT("iVBORw0KGgo")) && Trimmed.Len() > 100) // Base64 PNG header + reasonable size
@@ -2503,8 +2992,12 @@ void SUnrealGPTWidget::HandleToolResult(const FString& ToolCallId, const FString
 	// Try to generate a friendlier summary for JSON array results (e.g., scene_query)
 	FString DisplayText;
 	bool bIsSceneQueryResult = false;
-	
-	if (!bIsScreenshot && Trimmed.StartsWith(TEXT("[")))
+
+	if (bIsClarifyResult)
+	{
+		DisplayText = FUnrealGPTClarifyTypes::FormatAnswerSummary(Trimmed, ClarifyRequest);
+	}
+	else if (!bIsScreenshot && Trimmed.StartsWith(TEXT("[")))
 	{
 		TArray<TSharedPtr<FJsonValue>> JsonArray;
 		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Trimmed);
@@ -2554,8 +3047,8 @@ void SUnrealGPTWidget::HandleToolResult(const FString& ToolCallId, const FString
 		}
 	}
 
-	// Fallback: just show the raw result (unless it's a screenshot)
-	if (DisplayText.IsEmpty() && !bIsScreenshot)
+	// Fallback: just show the raw result (unless it's a screenshot or clarify summary)
+	if (DisplayText.IsEmpty() && !bIsScreenshot && !bIsClarifyResult)
 	{
 		// Try to parse Python result JSON structure (status/message/details)
 		bool bIsPythonResult = false;
@@ -2740,15 +3233,17 @@ void SUnrealGPTWidget::HandleToolResult(const FString& ToolCallId, const FString
 						[
 							SNew(SBorder)
 							.BorderImage(FAppStyle::GetBrush("Brushes.White"))
-							.BorderBackgroundColor(bIsSceneQueryResult ? FLinearColor(0.831f, 0.302f, 0.941f, 1.0f)
-								: (bIsScreenshot ? FLinearColor(1.0f, 0.478f, 0.239f, 1.0f) : FLinearColor(0.129f, 0.773f, 0.369f, 1.0f)))
+							.BorderBackgroundColor(bIsClarifyResult ? FLinearColor(0.0f, 0.6f, 1.0f, 1.0f)
+								: (bIsSceneQueryResult ? FLinearColor(0.831f, 0.302f, 0.941f, 1.0f)
+								: (bIsScreenshot ? FLinearColor(1.0f, 0.478f, 0.239f, 1.0f) : FLinearColor(0.129f, 0.773f, 0.369f, 1.0f))))
 							.Padding(0.0f)
 							.HAlign(HAlign_Center)
 							.VAlign(VAlign_Center)
 							[
 								SNew(STextBlock)
 								.Font(FAppStyle::Get().GetFontStyle("FontAwesome.12"))
-								.Text(FText::FromString(bIsScreenshot ? FString(TEXT("\xf030")) : FString(TEXT("\xf00c")))) // Camera or Check icon
+								.Text(FText::FromString(bIsScreenshot ? FString(TEXT("\xf030"))
+									: (bIsClarifyResult ? FString(TEXT("\xf059")) : FString(TEXT("\xf00c")))))
 								.ColorAndOpacity(FStyleColors::ForegroundInverted)
 							]
 						]
@@ -2765,7 +3260,9 @@ void SUnrealGPTWidget::HandleToolResult(const FString& ToolCallId, const FString
 						.Padding(0.0f, 0.0f, 0.0f, 6.0f)
 						[
 							SNew(STextBlock)
-							.Text(NSLOCTEXT("UnrealGPT", "ToolResult", "Tool Result"))
+							.Text(bIsClarifyResult
+								? NSLOCTEXT("UnrealGPT", "ClarifyResult", "Clarification")
+								: NSLOCTEXT("UnrealGPT", "ToolResult", "Tool Result"))
 							.Font(UnrealGPTAgentUI::CaptionFont())
 							.ColorAndOpacity(FStyleColors::Foreground)
 						]
@@ -2776,7 +3273,7 @@ void SUnrealGPTWidget::HandleToolResult(const FString& ToolCallId, const FString
 							SNew(STextBlock)
 							.Text(FText::FromString(DisplayText))
 							.AutoWrapText(true)
-							.Font(bIsSceneQueryResult ? UnrealGPTAgentUI::BodyFont() : FCoreStyle::GetDefaultFontStyle("Mono", 8))
+							.Font(bIsSceneQueryResult || bIsClarifyResult ? UnrealGPTAgentUI::BodyFont() : FCoreStyle::GetDefaultFontStyle("Mono", 8))
 							.ColorAndOpacity(FStyleColors::Foreground)
 						]
 					]

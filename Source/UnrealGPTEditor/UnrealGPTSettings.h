@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "UObject/NoExportTypes.h"
 #include "Engine/DeveloperSettings.h"
+#include "Mcp/McpTypes.h"
 #include "UnrealGPTSettings.generated.h"
 
 UCLASS(config = Editor, defaultconfig, meta = (DisplayName = "UnrealGPT"))
@@ -71,6 +72,10 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Tools", meta = (DisplayName = "Enable Scene Summary"))
 	bool bEnableSceneSummary = true;
 
+	/** Enable native Blueprint graph tools (blueprint_query, blueprint_add_node, etc.) */
+	UPROPERTY(config, EditAnywhere, Category = "Tools", meta = (DisplayName = "Enable Blueprint Tools"))
+	bool bEnableBlueprintTools = true;
+
 	/** Enable built-in Replicate generation tool (direct HTTP integration, no MCP required) */
 	UPROPERTY(config, EditAnywhere, Category = "Replicate", meta = (DisplayName = "Enable Replicate Tool"))
 	bool bEnableReplicateTool = false;
@@ -126,6 +131,14 @@ public:
 	/** OpenAI Vector Store ID for file_search tool (UE Python API documentation). Leave empty to use default. */
 	UPROPERTY(config, EditAnywhere, Category = "Tools", meta = (DisplayName = "Vector Store ID"))
 	FString VectorStoreId = TEXT("vs_691df14e67fc819189353158b9f13942");
+
+	/** Enable MCP client tools (mcp_call, mcp_list_tools, etc.) */
+	UPROPERTY(config, EditAnywhere, Category = "MCP", meta = (DisplayName = "Enable MCP Tools"))
+	bool bEnableMcpTool = true;
+
+	/** Configured MCP servers (stdio local processes or remote HTTP/SSE endpoints). */
+	UPROPERTY(config, EditAnywhere, Category = "MCP", meta = (DisplayName = "MCP Servers", TitleProperty = "Name"))
+	TArray<FMcpServerConfig> McpServers;
 
 	bool ResolveAuthHeaders(FString& OutBearerToken, FString& OutChatGPTAccountId, FString& OutError) const;
 	bool IsUsingCodexChatGPTAuth() const;

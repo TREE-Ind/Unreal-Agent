@@ -31,8 +31,17 @@ public:
 	/** Build reflection_query tool schema */
 	static TSharedPtr<FJsonObject> BuildReflectionQueryTool(bool bUseResponsesApi);
 
+	/** Build read_log tool schema */
+	static TSharedPtr<FJsonObject> BuildReadLogTool(bool bUseResponsesApi);
+
 	/** Build replicate_generate tool schema */
 	static TSharedPtr<FJsonObject> BuildReplicateGenerateTool(bool bUseResponsesApi);
+
+	/** MCP client tool schemas */
+	static TSharedPtr<FJsonObject> BuildMcpListToolsTool(bool bUseResponsesApi);
+	static TSharedPtr<FJsonObject> BuildMcpCallTool(bool bUseResponsesApi);
+	static TSharedPtr<FJsonObject> BuildMcpReadResourceTool(bool bUseResponsesApi);
+	static TSharedPtr<FJsonObject> BuildMcpGetPromptTool(bool bUseResponsesApi);
 
 	// New atomic editor tools
 	
@@ -50,5 +59,18 @@ public:
 
 	/** Build snap_actor_to_ground tool schema - Line trace snap with normal alignment option */
 	static TSharedPtr<FJsonObject> BuildSnapActorToGroundTool(bool bUseResponsesApi);
+
+	/** Build clarify tool schema - structured user input with selectable options */
+	static TSharedPtr<FJsonObject> BuildClarifyTool(bool bUseResponsesApi);
+
+	/** Native blueprint graph tools */
+	static TSharedPtr<FJsonObject> BuildBlueprintQueryTool(bool bUseResponsesApi);
+	static TSharedPtr<FJsonObject> BuildBlueprintCreateTool(bool bUseResponsesApi);
+	static TSharedPtr<FJsonObject> BuildBlueprintAddVariableTool(bool bUseResponsesApi);
+	static TSharedPtr<FJsonObject> BuildBlueprintCompileTool(bool bUseResponsesApi);
+	static TSharedPtr<FJsonObject> BuildBlueprintAddNodeTool(bool bUseResponsesApi);
+	static TSharedPtr<FJsonObject> BuildBlueprintConnectPinsTool(bool bUseResponsesApi);
+	static TSharedPtr<FJsonObject> BuildBlueprintRemoveNodeTool(bool bUseResponsesApi);
+	static TSharedPtr<FJsonObject> BuildBlueprintSetPinDefaultTool(bool bUseResponsesApi);
 };
 

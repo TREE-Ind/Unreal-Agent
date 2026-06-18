@@ -10,7 +10,7 @@
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnAgentMessage, const FString&, Role, const FString&, Content, const TArray<FString>&, ToolCalls);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAgentReasoning, const FString&, ReasoningContent);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnToolCall, const FString&, ToolName, const FString&, Arguments);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnToolCall, const FString&, ToolCallId, const FString&, ToolName, const FString&, Arguments);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnToolResult, const FString&, ToolCallId, const FString&, Result);
 
 USTRUCT()
@@ -72,6 +72,12 @@ public:
 	/** Clear conversation history */
 	void ClearHistory();
 
+	/** Submit user answers for a pending clarify tool call */
+	void SubmitClarifyResponse(const FString& ToolCallId, const FString& AnswersJson);
+
+	/** Whether the agent is waiting for clarify tool input */
+	bool IsAwaitingClarifyResponse() const { return bAwaitingClarifyResponse; }
+
 	/** Delegate for agent messages */
 	UPROPERTY(BlueprintAssignable)
 	FOnAgentMessage OnAgentMessage;
@@ -102,7 +108,13 @@ private:
 	void ProcessResponsesApiResponse(const FString& ResponseContent);
 
 	/** Execute a tool call */
-	FString ExecuteToolCall(const FString& ToolName, const FString& ArgumentsJson);
+	FString ExecuteToolCall(const FString& ToolCallId, const FString& ToolName, const FString& ArgumentsJson);
+
+	/** Complete or cancel a pending clarify tool call and optionally continue the agent loop */
+	void FinalizeClarifyResponse(const FString& ToolCallId, const FString& ResultJson, bool bContinueConversation);
+
+	/** Clear any pending clarify state without continuing the loop */
+	void ClearPendingClarify();
 
 	/** Execute Python code */
 	FString ExecutePythonCode(const FString& Code);
@@ -192,5 +204,9 @@ private:
 
 	FString PendingCodexRefreshRetryBody;
 	bool bHasRetriedAfterCodexRefresh = false;
+
+	/** Pending clarify tool call awaiting user input */
+	FString PendingClarifyCallId;
+	bool bAwaitingClarifyResponse = false;
 };
 

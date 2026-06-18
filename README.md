@@ -14,6 +14,7 @@ It runs *inside* the editor as a dockable tab, talks to OpenAI’s GPT models, a
 - **In‑editor chat assistant**
   - Dockable `UnrealGPT` tab under `Window → UnrealGPT`.
   - `Ctrl+Enter` to send messages.
+  - Drag-and-drop **Content Browser assets** into the chat for structured asset context.
 
 - **Scene understanding & context capture**
   - `Capture Context` button:
@@ -187,7 +188,13 @@ Key settings (`UUnrealGPTSettings`):
    - Attached images are base64‑encoded and included with your next message.
    - A small label indicates how many images are attached.
 
-6. **Manage the conversation**
+6. **Attach Content Browser assets**
+   - Drag one or more assets from the **Content Browser** onto the Unreal Agent tab or the composer input area.
+   - Attached assets appear as thumbnail chips above the input (up to 16 per message).
+   - **Texture2D** assets are also sent as vision images automatically.
+   - The agent receives structured `[Attached UE Assets]` JSON with `object_path`, class, and package metadata for scripting.
+
+7. **Manage the conversation**
    - **Clear History**: Resets the agent’s conversation state and clears the chat UI.
    - **Reasoning strip**:
      - A small strip above the input shows brief reasoning or “Thinking…” while the model is working.
@@ -239,12 +246,20 @@ The plugin configures a set of tools that the model can call autonomously:
     - `details.files[*].local_path`, `mime_type`, `inferred_usage`.
   - Use with `python_execute` and `unrealgpt_mcp_import` to turn files into UE assets.
 
+- **`mcp_list_tools` / `mcp_call` / `mcp_read_resource` / `mcp_get_prompt`** (optional)
+  - Available when **Enable MCP Tools** is on and at least one MCP server is configured in **Project Settings → Plugins → UnrealGPT → MCP**.
+  - Connects to external MCP servers over **stdio** (local processes) or **HTTP/SSE** (remote endpoints).
+  - `mcp_call` invokes a remote tool and returns `details.files` with staged local paths for import.
+  - Use `mcp_list_tools` to discover server capabilities before calling.
+
 > **Note**  
 > A “Computer Use” tool is stubbed out in the codebase but currently disabled for safety.
 
 ---
 
 ### Python Helpers for MCP / Replicate Imports
+
+Configure MCP servers in **Edit → Project Settings → Plugins → UnrealGPT → MCP** (no external `mcp.json` required). Add stdio servers (command + args) or remote HTTP/SSE URLs with optional auth headers.
 
 The plugin ships with a Python helper module:
 

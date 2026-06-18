@@ -37,7 +37,8 @@ def import_mcp_texture(mcp_result_json, target_folder, asset_name_hint=None):
     
     try:
         mcp_data = json.loads(mcp_result_json)
-        if mcp_data.get("status") != "ok":
+        status = mcp_data.get("status", "")
+        if status not in ("ok", "success"):
             result["status"] = "error"
             result["message"] = f"MCP call failed: {mcp_data.get('message', 'Unknown error')}"
             return result
@@ -53,7 +54,8 @@ def import_mcp_texture(mcp_result_json, target_folder, asset_name_hint=None):
         for file_info in files:
             usage = file_info.get("inferred_usage", "").lower()
             mime_type = file_info.get("mime_type", "").lower()
-            if usage == "image" or mime_type.startswith("image/"):
+            ext = os.path.splitext(file_info.get("local_path", ""))[1].lower().lstrip(".")
+            if usage == "image" or mime_type.startswith("image/") or ext in ("png", "jpg", "jpeg", "webp", "gif"):
                 image_file = file_info
                 break
         
@@ -124,7 +126,8 @@ def import_mcp_static_mesh(mcp_result_json, target_folder, asset_name_hint=None)
     
     try:
         mcp_data = json.loads(mcp_result_json)
-        if mcp_data.get("status") != "ok":
+        status = mcp_data.get("status", "")
+        if status not in ("ok", "success"):
             result["status"] = "error"
             result["message"] = f"MCP call failed: {mcp_data.get('message', 'Unknown error')}"
             return result
@@ -211,7 +214,8 @@ def import_mcp_audio(mcp_result_json, target_folder, asset_name_hint=None):
     
     try:
         mcp_data = json.loads(mcp_result_json)
-        if mcp_data.get("status") != "ok":
+        status = mcp_data.get("status", "")
+        if status not in ("ok", "success"):
             result["status"] = "error"
             result["message"] = f"MCP call failed: {mcp_data.get('message', 'Unknown error')}"
             return result

@@ -49,6 +49,11 @@ public:
 		TArray<FUnrealGPTSseEvent>& OutEvents,
 		FString& OutError);
 
+	/** Parse an in-memory SSE response body into discrete events. */
+	static bool ParseEventsFromBody(
+		const FString& Body,
+		TArray<FUnrealGPTSseEvent>& OutEvents);
+
 private:
 	/** Parse a full SSE stream string into discrete events. */
 	static void ParseSseStream(

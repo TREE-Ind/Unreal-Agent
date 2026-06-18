@@ -89,6 +89,20 @@ bool FUnrealGPTSseClient::FetchEvents(
 	return OutEvents.Num() > 0;
 }
 
+bool FUnrealGPTSseClient::ParseEventsFromBody(
+	const FString& Body,
+	TArray<FUnrealGPTSseEvent>& OutEvents)
+{
+	OutEvents.Reset();
+	if (Body.IsEmpty())
+	{
+		return false;
+	}
+
+	ParseSseStream(Body, OutEvents);
+	return OutEvents.Num() > 0;
+}
+
 void FUnrealGPTSseClient::ParseSseStream(
 	const FString& Stream,
 	TArray<FUnrealGPTSseEvent>& OutEvents)

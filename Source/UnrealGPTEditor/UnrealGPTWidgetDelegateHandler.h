@@ -24,7 +24,7 @@ public:
 	void OnAgentReasoningReceived(const FString& ReasoningContent);
 
 	UFUNCTION()
-	void OnToolCallReceived(const FString& ToolName, const FString& Arguments);
+	void OnToolCallReceived(const FString& ToolCallId, const FString& ToolName, const FString& Arguments);
 
 	UFUNCTION()
 	void OnToolResultReceived(const FString& ToolCallId, const FString& Result);

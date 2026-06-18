@@ -34,11 +34,11 @@ void UUnrealGPTWidgetDelegateHandler::OnAgentReasoningReceived(const FString& Re
 	}
 }
 
-void UUnrealGPTWidgetDelegateHandler::OnToolCallReceived(const FString& ToolName, const FString& Arguments)
+void UUnrealGPTWidgetDelegateHandler::OnToolCallReceived(const FString& ToolCallId, const FString& ToolName, const FString& Arguments)
 {
 	if (Widget)
 	{
-		Widget->HandleToolCall(ToolName, Arguments);
+		Widget->HandleToolCall(ToolCallId, ToolName, Arguments);
 	}
 }
 

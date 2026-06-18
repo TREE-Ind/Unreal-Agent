@@ -2,6 +2,7 @@
 
 #include "UnrealGPTEditor.h"
 #include "ISettingsModule.h"
+#include "UnrealGPTLogCapture.h"
 #include "UnrealGPTSettings.h"
 #include "LevelEditor.h"
 #include "ToolMenus.h"
@@ -15,11 +16,13 @@ static const FName UnrealGPTTabName("UnrealGPT");
 
 void FUnrealGPTEditorModule::StartupModule()
 {
+	FUnrealGPTLogCapture::Get().Initialize();
 	RegisterMenus();
 }
 
 void FUnrealGPTEditorModule::ShutdownModule()
 {
+	FUnrealGPTLogCapture::Get().Shutdown();
 }
 
 void FUnrealGPTEditorModule::RegisterMenus()
